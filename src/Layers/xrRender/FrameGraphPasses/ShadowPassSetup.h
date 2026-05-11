@@ -29,6 +29,22 @@ struct ShadowPassState
     nvrhi::InputLayoutHandle shadowInputLayout;
     nvrhi::BindingLayoutHandle shadowBindingLayout;
     nvrhi::GraphicsPipelineHandle shadowPipeline;
+
+    struct SkinnedVariant
+    {
+        nvrhi::ShaderHandle vs;
+        nvrhi::InputLayoutHandle inputLayout;
+        nvrhi::GraphicsPipelineHandle pipeline;
+    };
+
+    bool skinnedInitialized = false;
+    nvrhi::BindingLayoutHandle skinnedBindingLayout;
+    nvrhi::ShaderHandle skinnedPS;
+    SkinnedVariant skNonHQ;
+    SkinnedVariant skHQ1W;
+    SkinnedVariant skHQ2W;
+    SkinnedVariant skHQ3W;
+    SkinnedVariant skHQ4W;
 };
 
 struct ShadowPassResources

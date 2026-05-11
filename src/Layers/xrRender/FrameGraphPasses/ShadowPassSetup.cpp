@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "ShadowPassSetup.h"
+#include "ShaderConstants.h"
 #include "PassCommon.h"
 #include "Layers/xrRender/Shadow/ShadowManager.h"
 #include "Layers/xrRender/Shadow/ShadowTypes.h"
@@ -14,6 +15,9 @@
 #include "Layers/xrRender/Backend/D3D12Backend.h"
 #include "Layers/xrRender/Bindless/MaterialBuffer.h"
 #include "Layers/xrRender/GPUCullingManager.h"
+#include "Layers/xrRender/SkeletonCustom.h"
+#include "Layers/xrRender/FSkinned.h"
+#include "Layers/xrRender/SkeletonX.h"
 
 namespace xray::render::fg::passes {
 
@@ -89,6 +93,169 @@ static void InitializeShadowResources(
     Msg("* [ShadowPass] Pipeline initialized");
 }
 
+static void InitializeSkinnedShadowResources(
+    fg::RenderDevice* device,
+    const nvrhi::FramebufferInfoEx& fbInfo,
+    ShadowPassState& state)
+{
+    if (state.skinnedInitialized)
+        return;
+
+    nvrhi::IDevice* nvDevice = device->GetNVRHIDevice();
+    auto* shaderLoader = GEnv.Render->GetShaderLoader();
+
+    auto psResult = shaderLoader->LoadPixelShader("shadow_skinned", "main");
+    if (!psResult.handle) {
+        Msg("! [ShadowPass] Failed to load shadow_skinned.ps");
+        return;
+    }
+    state.skinnedPS = psResult.handle;
+
+    auto& cache = framegraph::GetPassResourceCache();
+
+    nvrhi::BindingLayoutDesc layoutDesc;
+    layoutDesc.visibility = nvrhi::ShaderType::All;
+    layoutDesc.bindings = {
+        nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
+        nvrhi::BindingLayoutItem::VolatileConstantBuffer(3),
+        nvrhi::BindingLayoutItem::VolatileConstantBuffer(4),
+        nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),
+        nvrhi::BindingLayoutItem::StructuredBuffer_SRV(8),
+        nvrhi::BindingLayoutItem::Sampler(0),
+    };
+    state.skinnedBindingLayout = nvDevice->createBindingLayout(layoutDesc);
+
+    auto* backend = device->GetBackend();
+    nvrhi::IBindingLayout* bindlessLayout = backend ? backend->GetBindlessLayout() : nullptr;
+
+    auto initVariant = [&](ShadowPassState::SkinnedVariant& var,
+        const char* shaderName, const char* pipeName,
+        nvrhi::VertexAttributeDesc* attribs, u32 attribCount)
+    {
+        auto vsResult = shaderLoader->LoadVertexShader(shaderName, "main");
+        if (!vsResult.handle) return;
+        var.vs = vsResult.handle;
+        var.inputLayout = nvDevice->createInputLayout(attribs, attribCount, var.vs);
+
+        nvrhi::GraphicsPipelineDesc pd;
+        pd.VS = var.vs;
+        pd.PS = state.skinnedPS;
+        pd.inputLayout = var.inputLayout;
+        if (bindlessLayout)
+            pd.bindingLayouts = { state.skinnedBindingLayout, bindlessLayout };
+        else
+            pd.bindingLayouts = { state.skinnedBindingLayout };
+        pd.primType = nvrhi::PrimitiveType::TriangleList;
+        pd.renderState.depthStencilState.depthTestEnable = true;
+        pd.renderState.depthStencilState.depthWriteEnable = true;
+        pd.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::LessOrEqual;
+        pd.renderState.rasterState.frontCounterClockwise = false;
+        pd.renderState.rasterState.cullMode = nvrhi::RasterCullMode::Back;
+        pd.renderState.rasterState.depthBias = 100;
+        pd.renderState.rasterState.slopeScaledDepthBias = 2.0f;
+        pd.renderState.rasterState.depthBiasClamp = 0.01f;
+        var.pipeline = cache.GetOrCreatePipeline(pipeName, pd, fbInfo, nvDevice);
+    };
+
+    {
+        constexpr u32 s = 24;
+        nvrhi::VertexAttributeDesc a[] = {
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGBA16_SNORM).setOffset(0).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(8).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(12).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("BINORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(16).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG16_SNORM).setOffset(20).setElementStride(s),
+        };
+        initVariant(state.skNonHQ, "shadow_skinned", "ShadowSk_NonHQ", a, 5);
+    }
+    {
+        constexpr u32 s = 36;
+        nvrhi::VertexAttributeDesc a[] = {
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(0).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(16).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(20).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("BINORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(24).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG32_FLOAT).setOffset(28).setElementStride(s),
+        };
+        initVariant(state.skHQ1W, "shadow_skinned_hq", "ShadowSk_HQ1W", a, 5);
+    }
+    {
+        constexpr u32 s = 44;
+        nvrhi::VertexAttributeDesc a[] = {
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(0).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(16).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(20).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("BINORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(24).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(28).setElementStride(s),
+        };
+        initVariant(state.skHQ2W, "shadow_skinned_2w", "ShadowSk_HQ2W", a, 5);
+    }
+    {
+        constexpr u32 s = 44;
+        nvrhi::VertexAttributeDesc a[] = {
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(0).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(16).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(20).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("BINORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(24).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(28).setElementStride(s),
+        };
+        initVariant(state.skHQ3W, "shadow_skinned_3w", "ShadowSk_HQ3W", a, 5);
+    }
+    {
+        constexpr u32 s = 40;
+        nvrhi::VertexAttributeDesc a[] = {
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(0).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(16).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(20).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("BINORMAL").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(24).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG32_FLOAT).setOffset(28).setElementStride(s),
+            nvrhi::VertexAttributeDesc().setName("BLENDINDICES").setFormat(nvrhi::Format::BGRA8_UNORM).setOffset(36).setElementStride(s),
+        };
+        initVariant(state.skHQ4W, "shadow_skinned_4w", "ShadowSk_HQ4W", a, 6);
+    }
+
+    state.skinnedInitialized = true;
+    Msg("* [ShadowPass] Skinned pipelines initialized");
+}
+
+enum {
+    SK_RM_SKINNING_2B = 5, SK_RM_SKINNING_2B_HQ = 6,
+    SK_RM_SKINNING_3B = 7, SK_RM_SKINNING_3B_HQ = 8,
+};
+
+static nvrhi::IGraphicsPipeline* SelectSkinnedShadowPipeline(
+    const ShadowPassState& state, u32 stride, u16 renderMode)
+{
+    if (stride == 24) return state.skNonHQ.pipeline.Get();
+    if (stride == 36) return state.skHQ1W.pipeline.Get();
+    if (stride == 40) return state.skHQ4W.pipeline.Get();
+    if (stride == 44) {
+        if (renderMode == SK_RM_SKINNING_3B || renderMode == SK_RM_SKINNING_3B_HQ)
+            return state.skHQ3W.pipeline.Get();
+        return state.skHQ2W.pipeline.Get();
+    }
+    return nullptr;
+}
+
+static u32 GetShadowSkeletonBoneOffset(
+    nvrhi::ICommandList* cmdList,
+    GPUCullingManager& gpuCullMgr,
+    const GeometryBatch& batch)
+{
+    CKinematics* parent = nullptr;
+    u32 visualType = batch.visual ? batch.visual->getType() : 0;
+
+    if (visualType == MT_SKELETON_GEOMDEF_ST)
+        parent = static_cast<CSkeletonX_ST*>(batch.visual)->GetParent();
+    else if (visualType == MT_SKELETON_GEOMDEF_PM)
+        parent = static_cast<CSkeletonX_PM*>(batch.visual)->GetParent();
+
+    if (!parent)
+        return 0;
+
+    return gpuCullMgr.GetOrUploadSkeleton(cmdList, parent);
+}
+
 struct ShadowPassData
 {
     framegraph::VirtualResourceHandle shadowArray;
@@ -96,6 +263,7 @@ struct ShadowPassData
     u32 smapSize;
     fg::RenderDevice* device;
     shadow::ShadowManager* shadows;
+    const GeometryCollector* geometry;
     ShadowPassState* passState;
 };
 
@@ -117,6 +285,7 @@ ShadowPassResources setupShadowPasses(
     nvrhi::FramebufferInfoEx fbInfo;
     fbInfo.depthFormat = nvrhi::Format::D32;
     InitializeShadowResources(device, fbInfo, *state);
+    InitializeSkinnedShadowResources(device, fbInfo, *state);
     if (!state->initialized)
         return resources;
 
@@ -150,6 +319,7 @@ ShadowPassResources setupShadowPasses(
             data.smapSize = config.shadowMapSize;
             data.device = device;
             data.shadows = &shadows;
+            data.geometry = geometry;
             data.passState = state;
         },
         [](const ShadowPassData& data, const framegraph::FrameGraph& fg,
@@ -239,6 +409,92 @@ ShadowPassResources setupShadowPasses(
 
                 DrawIndexedIndirectCountOrFallback(
                     cmdList, 0, 0, gpuCulling->GetStaticObjectCount());
+
+                u32 terrainCount = gpuCulling->GetTerrainObjectCount();
+                if (terrainCount > 0 && gpuCulling->GetTerrainCompactDrawArgsBuffer())
+                {
+                    framegraph::BindingSetBuilder terrBsb(*vsRefl, *psRefl, nvDevice, "ShadowPass.Terrain");
+                    terrBsb.ConstantBuffer("ShadowViewCB", shadowCBBuffer);
+                    terrBsb.BufferSRV("g_Materials", matBuffer.GetBuffer());
+                    terrBsb.BufferSRV("g_InstanceData", gpuCulling->GetTerrainInstanceBuffer());
+                    terrBsb.BufferSRV("g_CompactBatchIndices", gpuCulling->GetTerrainCompactBatchIndicesBuffer());
+                    terrBsb.BufferSRV("g_CompactMaterialIDs", gpuCulling->GetTerrainCompactMaterialIDBuffer());
+
+                    auto terrBindingSet = cache.GetOrCreateBindingSet(
+                        terrBsb.Build(), data.passState->shadowBindingLayout, nvDevice);
+
+                    gfxState.bindings = { terrBindingSet };
+                    if (bindlessTable)
+                        gfxState.addBindingSet(bindlessTable);
+                    gfxState.indirectParams = gpuCulling->GetTerrainCompactDrawArgsBuffer();
+
+                    cmdList->setGraphicsState(gfxState);
+                    DrawIndexedIndirectCountOrFallback(
+                        cmdList, 0, 0, terrainCount);
+                }
+
+                if (data.passState->skinnedInitialized && data.geometry)
+                {
+                    auto* globalBoneBuffer = gpuCulling->GetGlobalBoneBuffer();
+                    if (globalBoneBuffer)
+                    {
+                        auto dynTransCB = cache.GetOrCreateVolatileCB(
+                            "ShadowPass", "SkinnedDynTrans", sizeof(Fmatrix), data.device, 8192);
+                        auto skinnedMatCB = cache.GetOrCreateVolatileCB(
+                            "ShadowPass", "SkinnedMat", sizeof(SkinnedMaterialCB), data.device, 8192);
+
+                        for (const auto& batch : data.geometry->GetBatches())
+                        {
+                            if (!batch.isSkinned || !batch.vertexBuffer || !batch.indexBuffer)
+                                continue;
+
+                            auto* skPipeline = SelectSkinnedShadowPipeline(
+                                *data.passState, batch.vertexStride, batch.skinningRenderMode);
+                            if (!skPipeline)
+                                continue;
+
+                            u32 boneOffset = GetShadowSkeletonBoneOffset(cmdList, *gpuCulling, batch);
+
+                            Fmatrix worldMat = batch.worldMatrix;
+                            cmdList->writeBuffer(dynTransCB, &worldMat, sizeof(worldMat));
+
+                            SkinnedMaterialCB matCB = {};
+                            matCB.materialID = batch.bindlessMaterialID;
+                            matCB.skeletonBoneOffset = boneOffset;
+                            cmdList->writeBuffer(skinnedMatCB, &matCB, sizeof(matCB));
+
+                            nvrhi::BindingSetDesc skBindDesc;
+                            skBindDesc.bindings = {
+                                nvrhi::BindingSetItem::ConstantBuffer(0, dynTransCB),
+                                nvrhi::BindingSetItem::ConstantBuffer(3, shadowCBBuffer),
+                                nvrhi::BindingSetItem::ConstantBuffer(4, skinnedMatCB),
+                                nvrhi::BindingSetItem::StructuredBuffer_SRV(3, globalBoneBuffer),
+                                nvrhi::BindingSetItem::StructuredBuffer_SRV(8, matBuffer.GetBuffer()),
+                                nvrhi::BindingSetItem::Sampler(0, cache.GetAnisoWrapSampler(nvDevice)),
+                            };
+                            auto skBindingSet = cache.GetOrCreateBindingSet(
+                                skBindDesc, data.passState->skinnedBindingLayout, nvDevice);
+
+                            nvrhi::GraphicsState skState;
+                            skState.pipeline = skPipeline;
+                            skState.framebuffer = framebuffer;
+                            skState.vertexBuffers = {{ batch.vertexBuffer, 0, 0 }};
+                            skState.indexBuffer = { batch.indexBuffer, nvrhi::Format::R16_UINT, 0 };
+                            skState.viewport.addViewport(smapViewport);
+                            skState.viewport.addScissorRect(nvrhi::Rect(data.smapSize, data.smapSize));
+                            skState.bindings = { skBindingSet };
+                            if (bindlessTable)
+                                skState.addBindingSet(bindlessTable);
+                            skState.indirectParams = nullptr;
+
+                            cmdList->setGraphicsState(skState);
+                            cmdList->drawIndexed(nvrhi::DrawArguments()
+                                .setVertexCount(batch.indexCount)
+                                .setStartIndexLocation(batch.startIndex)
+                                .setStartVertexLocation(batch.baseVertex));
+                        }
+                    }
+                }
             }
         }
     );
