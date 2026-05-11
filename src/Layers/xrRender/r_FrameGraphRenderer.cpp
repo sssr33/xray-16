@@ -1269,7 +1269,8 @@ void FrameGraphRenderer::SetupFrameGraphPasses() {
             m_device,
             m_geometryCollector.get(),
             m_shadowPassState.get(),
-            &m_hudBatches);
+            &m_hudBatches,
+            m_detailManager.get());
     }
 
     auto forwardOutputs = passes::setupForwardColorPass(

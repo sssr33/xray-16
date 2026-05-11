@@ -18,6 +18,15 @@
 #include "Layers/xrRender/SkeletonCustom.h"
 #include "Layers/xrRender/FSkinned.h"
 #include "Layers/xrRender/SkeletonX.h"
+#include "Layers/xrRender/FGDetailManager.h"
+#include "xrCDB/Frustum.h"
+
+namespace xray::render::fg { extern int ps_r__detail_gpu; extern int ps_r__detail_shadows; }
+extern ENGINE_API float ps_r3_grass_lod_close;
+extern ENGINE_API float ps_r3_grass_lod_mid;
+extern ENGINE_API float ps_r3_grass_wind_displacement;
+extern ENGINE_API float ps_r3_grass_interaction_displacement;
+extern ENGINE_API float ps_r3_grass_blade_height;
 
 namespace xray::render::fg::passes {
 
@@ -256,6 +265,340 @@ static u32 GetShadowSkeletonBoneOffset(
     return gpuCullMgr.GetOrUploadSkeleton(cmdList, parent);
 }
 
+struct alignas(16) GrassShadowCullParams {
+    Fvector4 lightFrustumPlanes[6];
+    Fvector3 cameraPos;
+    float fadeDistanceSqr;
+    float lodDistanceCloseSqr;
+    float lodDistanceMidSqr;
+    u32 totalSlotCount;
+    u32 visibleCapacity;
+    u32 grassMode;
+    u32 visibleDecalCapacity;
+    u32 pad0, pad1;
+};
+
+static void InitializeGrassShadowResources(
+    fg::RenderDevice* device,
+    const nvrhi::FramebufferInfoEx& fbInfo,
+    ShadowPassState& state)
+{
+    if (state.grassInitialized)
+        return;
+
+    nvrhi::IDevice* nvDevice = device->GetNVRHIDevice();
+    auto* shaderLoader = GEnv.Render->GetShaderLoader();
+    auto& cache = framegraph::GetPassResourceCache();
+    auto* backend = device->GetBackend();
+    nvrhi::IBindingLayout* bindlessLayout = backend ? backend->GetBindlessLayout() : nullptr;
+
+    auto csResult = shaderLoader->LoadComputeShader("detail_shadow_cull", "main");
+    if (!csResult.handle) {
+        Msg("! [ShadowPass] Failed to load detail_shadow_cull.cs");
+        state.grassInitialized = true;
+        return;
+    }
+
+    state.grassShadowCullLayout = cache.GetOrCreateBindingLayoutFromReflection(
+        "ShadowGrassCull", *csResult.reflection, nvDevice);
+
+    nvrhi::ComputePipelineDesc cpDesc;
+    cpDesc.CS = csResult.handle;
+    cpDesc.bindingLayouts = { state.grassShadowCullLayout };
+    state.grassShadowCullPipeline = nvDevice->createComputePipeline(cpDesc);
+
+    for (u32 c = 0; c < ShadowPassState::NUM_SHADOW_CASCADES; c++)
+    {
+        auto& cb = state.grassShadowCascades[c];
+        for (u32 lod = 0; lod < ShadowPassState::NUM_GRASS_LODS; lod++)
+        {
+            nvrhi::BufferDesc visDesc;
+            visDesc.byteSize = ShadowPassState::MAX_SHADOW_GRASS_INSTANCES * sizeof(u32);
+            visDesc.structStride = sizeof(u32);
+            visDesc.debugName = "GrassShadowVisible";
+            visDesc.canHaveUAVs = true;
+            visDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+            visDesc.keepInitialState = true;
+            cb.visibleBuffer[lod] = nvDevice->createBuffer(visDesc);
+
+            nvrhi::BufferDesc argsDesc;
+            argsDesc.byteSize = 20;
+            argsDesc.debugName = "GrassShadowDrawArgs";
+            argsDesc.canHaveUAVs = true;
+            argsDesc.canHaveRawViews = true;
+            argsDesc.isDrawIndirectArgs = true;
+            argsDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+            argsDesc.keepInitialState = true;
+            cb.drawArgsBuffer[lod] = nvDevice->createBuffer(argsDesc);
+        }
+
+        nvrhi::BufferDesc visDecalDesc;
+        visDecalDesc.byteSize = ShadowPassState::MAX_SHADOW_GRASS_INSTANCES * sizeof(u32);
+        visDecalDesc.structStride = sizeof(u32);
+        visDecalDesc.debugName = "GrassShadowVisibleDecal";
+        visDecalDesc.canHaveUAVs = true;
+        visDecalDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        visDecalDesc.keepInitialState = true;
+        cb.visibleDecalBuffer = nvDevice->createBuffer(visDecalDesc);
+
+        nvrhi::BufferDesc decalArgsDesc;
+        decalArgsDesc.byteSize = 20;
+        decalArgsDesc.debugName = "GrassShadowDecalDrawArgs";
+        decalArgsDesc.canHaveUAVs = true;
+        decalArgsDesc.canHaveRawViews = true;
+        decalArgsDesc.isDrawIndirectArgs = true;
+        decalArgsDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        decalArgsDesc.keepInitialState = true;
+        cb.decalDrawArgsBuffer = nvDevice->createBuffer(decalArgsDesc);
+    }
+
+    auto grassVsResult = shaderLoader->LoadVertexShader("detail_shadow_gpu", "main");
+    auto grassPsResult = shaderLoader->LoadPixelShader("depth_prepass", "main");
+    if (grassVsResult.handle && grassPsResult.handle) {
+        state.grassShadowVS = grassVsResult.handle;
+        state.grassShadowBindingLayout = cache.GetOrCreateBindingLayoutFromReflection(
+            "ShadowGrass", *grassVsResult.reflection, *grassPsResult.reflection, nvDevice);
+
+        nvrhi::VertexAttributeDesc grassAttribs[] = {
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setElementStride(28),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG32_FLOAT).setOffset(12).setElementStride(28),
+            nvrhi::VertexAttributeDesc().setName("COLOR0").setFormat(nvrhi::Format::R32_FLOAT).setOffset(20).setElementStride(28),
+            nvrhi::VertexAttributeDesc().setName("COLOR1").setFormat(nvrhi::Format::R32_FLOAT).setOffset(24).setElementStride(28),
+        };
+        state.grassShadowInputLayout = nvDevice->createInputLayout(grassAttribs, 4, state.grassShadowVS);
+
+        nvrhi::GraphicsPipelineDesc pd;
+        pd.VS = state.grassShadowVS;
+        pd.PS = grassPsResult.handle;
+        pd.inputLayout = state.grassShadowInputLayout;
+        if (bindlessLayout)
+            pd.bindingLayouts = { state.grassShadowBindingLayout, bindlessLayout };
+        else
+            pd.bindingLayouts = { state.grassShadowBindingLayout };
+        pd.primType = nvrhi::PrimitiveType::TriangleList;
+        pd.renderState.depthStencilState.depthTestEnable = true;
+        pd.renderState.depthStencilState.depthWriteEnable = true;
+        pd.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::LessOrEqual;
+        pd.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+        pd.renderState.rasterState.depthBias = 50;
+        pd.renderState.rasterState.slopeScaledDepthBias = 1.0f;
+        state.grassShadowPipeline = cache.GetOrCreatePipeline("ShadowGrassGPU", pd, fbInfo, nvDevice);
+    }
+
+    auto bbVsResult = shaderLoader->LoadVertexShader("detail_shadow_billboard", "main");
+    auto bbPsResult = shaderLoader->LoadPixelShader("detail_shadow_billboard", "main");
+    if (bbVsResult.handle && bbPsResult.handle) {
+        state.billboardShadowVS = bbVsResult.handle;
+        state.billboardShadowPS = bbPsResult.handle;
+        state.billboardShadowBindingLayout = cache.GetOrCreateBindingLayoutFromReflection(
+            "ShadowBillboard", *bbVsResult.reflection, *bbPsResult.reflection, nvDevice);
+
+        nvrhi::GraphicsPipelineDesc pd;
+        pd.VS = state.billboardShadowVS;
+        pd.PS = state.billboardShadowPS;
+        if (bindlessLayout)
+            pd.bindingLayouts = { state.billboardShadowBindingLayout, bindlessLayout };
+        else
+            pd.bindingLayouts = { state.billboardShadowBindingLayout };
+        pd.primType = nvrhi::PrimitiveType::TriangleList;
+        pd.renderState.depthStencilState.depthTestEnable = true;
+        pd.renderState.depthStencilState.depthWriteEnable = true;
+        pd.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::LessOrEqual;
+        pd.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+        pd.renderState.rasterState.depthBias = 50;
+        pd.renderState.rasterState.slopeScaledDepthBias = 1.0f;
+        state.billboardShadowPipeline = cache.GetOrCreatePipeline("ShadowBillboard", pd, fbInfo, nvDevice);
+    }
+
+    state.grassInitialized = true;
+    Msg("* [ShadowPass] Grass shadow pipelines initialized");
+}
+
+static void CullGrassForShadow(
+    nvrhi::ICommandList* cmdList,
+    fg::RenderDevice* renderDevice,
+    const ShadowPassState& passState,
+    fg::FGDetailManager* dm,
+    u32 cascadeIndex,
+    const Fmatrix& lightVP)
+{
+    if (!passState.grassShadowCullPipeline || cascadeIndex >= ShadowPassState::NUM_SHADOW_CASCADES)
+        return;
+
+    auto& cascade = passState.grassShadowCascades[cascadeIndex];
+    nvrhi::IDevice* nvDevice = renderDevice->GetNVRHIDevice();
+    auto& cache = framegraph::GetPassResourceCache();
+
+    Fmatrix lightVPCopy = lightVP;
+    CFrustum lightFrustum;
+    lightFrustum.CreateFromMatrix(lightVPCopy, FRUSTUM_P_LRTB | FRUSTUM_P_FAR);
+
+    float fadeDistance = g_pGamePersistent ? g_pGamePersistent->Environment().CurrentEnv.far_plane : 500.0f;
+
+    GrassShadowCullParams params = {};
+    u32 planeCount = std::min<u32>((u32)lightFrustum.p_count, 6);
+    for (u32 i = 0; i < 6; i++) {
+        if (i < planeCount)
+            params.lightFrustumPlanes[i].set(lightFrustum.planes[i].n.x, lightFrustum.planes[i].n.y, lightFrustum.planes[i].n.z, lightFrustum.planes[i].d);
+        else
+            params.lightFrustumPlanes[i].set(0, 0, 0, 1000000.0f);
+    }
+    params.cameraPos = Device.vCameraPosition;
+    params.fadeDistanceSqr = fadeDistance * fadeDistance;
+    params.lodDistanceCloseSqr = ps_r3_grass_lod_close * ps_r3_grass_lod_close;
+    params.lodDistanceMidSqr = ps_r3_grass_lod_mid * ps_r3_grass_lod_mid;
+    params.totalSlotCount = dm->slot_count;
+    params.visibleCapacity = ShadowPassState::MAX_SHADOW_GRASS_INSTANCES;
+    params.grassMode = ps_r__detail_gpu ? 1u : 0u;
+    params.visibleDecalCapacity = ShadowPassState::MAX_SHADOW_GRASS_INSTANCES;
+
+    auto cullParamsCB = cache.GetOrCreateVolatileCB(
+        "GrassShadowCull", "Params", sizeof(GrassShadowCullParams), renderDevice, 16);
+    cmdList->writeBuffer(cullParamsCB, &params, sizeof(params));
+
+    bool billboardMode = !ps_r__detail_gpu;
+    for (u32 lod = 0; lod < ShadowPassState::NUM_GRASS_LODS; lod++) {
+        u32 indexCount = billboardMode ? dm->maxPulledIndexCount : dm->bladeIndexCount[lod];
+        u32 drawArgs[5] = { indexCount, 0, 0, 0, 0 };
+        cmdList->writeBuffer(cascade.drawArgsBuffer[lod], drawArgs, sizeof(drawArgs));
+    }
+    {
+        u32 decalArgs[5] = { dm->maxPulledIndexCount, 0, 0, 0, 0 };
+        cmdList->writeBuffer(cascade.decalDrawArgsBuffer, decalArgs, sizeof(decalArgs));
+    }
+
+    auto* csRefl = GEnv.Render->GetShaderLoader()->GetCachedReflection("detail_shadow_cull", ".cs");
+    if (!csRefl) return;
+
+    framegraph::BindingSetBuilder bsb(*csRefl, nvDevice, "GrassShadowCull");
+    bsb.ConstantBuffer("GrassShadowCullParams", cullParamsCB);
+    bsb.BufferSRV("g_slot_aabbs", dm->slotAABBBuffer);
+    bsb.BufferSRV("g_all_instances", dm->generatedInstancesBuffer);
+    bsb.BufferSRV("g_detail_models", dm->detailModelsBuffer);
+    bsb.BufferUAV("g_visible_lod0", cascade.visibleBuffer[0]);
+    bsb.BufferUAV("g_indirect_args_lod0", cascade.drawArgsBuffer[0]);
+    bsb.BufferUAV("g_visible_lod1", cascade.visibleBuffer[1]);
+    bsb.BufferUAV("g_indirect_args_lod1", cascade.drawArgsBuffer[1]);
+    bsb.BufferUAV("g_visible_lod2", cascade.visibleBuffer[2]);
+    bsb.BufferUAV("g_indirect_args_lod2", cascade.drawArgsBuffer[2]);
+    bsb.BufferUAV("g_visible_decals", cascade.visibleDecalBuffer);
+    bsb.BufferUAV("g_indirect_args_decal", cascade.decalDrawArgsBuffer);
+
+    auto bindingSet = cache.GetOrCreateBindingSet(
+        bsb.Build(), passState.grassShadowCullLayout, nvDevice);
+
+    nvrhi::ComputeState cs;
+    cs.pipeline = passState.grassShadowCullPipeline;
+    cs.bindings = { bindingSet };
+    cmdList->setComputeState(cs);
+    cmdList->dispatch((dm->slot_count + 255) / 256, 1, 1);
+}
+
+static void RenderGrassShadows(
+    nvrhi::ICommandList* cmdList,
+    fg::RenderDevice* renderDevice,
+    nvrhi::IFramebuffer* framebuffer,
+    nvrhi::IBuffer* shadowCBBuffer,
+    nvrhi::IBuffer* detailGlobalsCB,
+    const ShadowPassState& passState,
+    fg::FGDetailManager* dm,
+    u32 cascadeIndex,
+    u32 smapSize)
+{
+    if (cascadeIndex >= ShadowPassState::NUM_SHADOW_CASCADES)
+        return;
+
+    auto& cascade = passState.grassShadowCascades[cascadeIndex];
+    nvrhi::IDevice* nvDevice = renderDevice->GetNVRHIDevice();
+    auto& cache = framegraph::GetPassResourceCache();
+    auto* backend = renderDevice->GetBackend();
+    nvrhi::IBindingSet* bindlessTable = backend ? backend->GetBindlessDescriptorTable() : nullptr;
+
+    float smapSizeF = static_cast<float>(smapSize);
+    nvrhi::Viewport smapViewport(0.0f, smapSizeF, 0.0f, smapSizeF, 0.0f, 1.0f);
+
+    bool billboardMode = !ps_r__detail_gpu;
+
+    if (!billboardMode && passState.grassShadowPipeline && dm->bladeVertexBuffer[0] && dm->bladeIndexBuffer[0])
+    {
+        auto* vsRefl = GEnv.Render->GetShaderLoader()->GetCachedReflection("detail_shadow_gpu", ".vs");
+        auto* psRefl = GEnv.Render->GetShaderLoader()->GetCachedReflection("depth_prepass", ".ps");
+        if (vsRefl && psRefl)
+        {
+            for (u32 lod = 0; lod < ShadowPassState::NUM_GRASS_LODS; lod++)
+            {
+                if (!dm->bladeVertexBuffer[lod] || !dm->bladeIndexBuffer[lod])
+                    continue;
+
+                framegraph::BindingSetBuilder bsb(*vsRefl, *psRefl, nvDevice, "ShadowGrass");
+                bsb.ConstantBuffer("ShadowViewCB", shadowCBBuffer);
+                bsb.ConstantBuffer("DetailGlobals", detailGlobalsCB);
+                bsb.Texture("g_Perlin4D", dm->perlin4dTexture);
+                bsb.BufferSRV("visible_indices", cascade.visibleBuffer[lod]);
+                bsb.BufferSRV("all_instances", dm->generatedInstancesBuffer);
+
+                auto bindingSet = cache.GetOrCreateBindingSet(
+                    bsb.Build(), passState.grassShadowBindingLayout, nvDevice);
+
+                nvrhi::GraphicsState gfxState;
+                gfxState.pipeline = passState.grassShadowPipeline;
+                gfxState.framebuffer = framebuffer;
+                gfxState.vertexBuffers = {{ dm->bladeVertexBuffer[lod], 0, 0 }};
+                gfxState.indexBuffer = { dm->bladeIndexBuffer[lod], nvrhi::Format::R32_UINT, 0 };
+                gfxState.viewport.addViewport(smapViewport);
+                gfxState.viewport.addScissorRect(nvrhi::Rect(smapSize, smapSize));
+                gfxState.bindings = { bindingSet };
+                if (bindlessTable) gfxState.addBindingSet(bindlessTable);
+                gfxState.indirectParams = cascade.drawArgsBuffer[lod];
+
+                cmdList->setGraphicsState(gfxState);
+                cmdList->drawIndexedIndirect(0);
+            }
+        }
+    }
+
+    if (passState.billboardShadowPipeline && dm->pulledVertexBuffer)
+    {
+        auto* vsRefl = GEnv.Render->GetShaderLoader()->GetCachedReflection("detail_shadow_billboard", ".vs");
+        auto* psRefl = GEnv.Render->GetShaderLoader()->GetCachedReflection("detail_shadow_billboard", ".ps");
+        if (vsRefl && psRefl)
+        {
+            auto drawBillboardSet = [&](nvrhi::IBuffer* visBuffer, nvrhi::IBuffer* argsBuffer) {
+                framegraph::BindingSetBuilder bsb(*vsRefl, *psRefl, nvDevice, "ShadowBillboard");
+                bsb.ConstantBuffer("ShadowViewCB", shadowCBBuffer);
+                bsb.ConstantBuffer("DetailGlobals", detailGlobalsCB);
+                bsb.Texture("g_Perlin4D", dm->perlin4dTexture);
+                bsb.BufferSRV("visible_indices", visBuffer);
+                bsb.BufferSRV("detail_models", dm->detailModelsBuffer);
+                bsb.BufferSRV("pulled_vertices", dm->pulledVertexBuffer);
+                bsb.BufferSRV("all_instances", dm->generatedInstancesBuffer);
+
+                auto bindingSet = cache.GetOrCreateBindingSet(
+                    bsb.Build(), passState.billboardShadowBindingLayout, nvDevice);
+
+                nvrhi::GraphicsState gfxState;
+                gfxState.pipeline = passState.billboardShadowPipeline;
+                gfxState.framebuffer = framebuffer;
+                gfxState.viewport.addViewport(smapViewport);
+                gfxState.viewport.addScissorRect(nvrhi::Rect(smapSize, smapSize));
+                gfxState.bindings = { bindingSet };
+                if (bindlessTable) gfxState.addBindingSet(bindlessTable);
+                gfxState.indirectParams = argsBuffer;
+
+                cmdList->setGraphicsState(gfxState);
+                cmdList->drawIndirect(0);
+            };
+
+            drawBillboardSet(cascade.visibleDecalBuffer, cascade.decalDrawArgsBuffer);
+
+            if (billboardMode) {
+                for (u32 lod = 0; lod < ShadowPassState::NUM_GRASS_LODS; lod++)
+                    drawBillboardSet(cascade.visibleBuffer[lod], cascade.drawArgsBuffer[lod]);
+            }
+        }
+    }
+}
+
 struct ShadowPassData
 {
     framegraph::VirtualResourceHandle shadowArray;
@@ -265,6 +608,7 @@ struct ShadowPassData
     shadow::ShadowManager* shadows;
     const GeometryCollector* geometry;
     ShadowPassState* passState;
+    fg::FGDetailManager* detailManager;
 };
 
 ShadowPassResources setupShadowPasses(
@@ -273,7 +617,8 @@ ShadowPassResources setupShadowPasses(
     RenderDevice* device,
     const GeometryCollector* geometry,
     ShadowPassState* state,
-    const xr_vector<GeometryBatch>* hudBatches)
+    const xr_vector<GeometryBatch>* hudBatches,
+    FGDetailManager* detailManager)
 {
     ShadowPassResources resources;
 
@@ -287,6 +632,8 @@ ShadowPassResources setupShadowPasses(
     fbInfo.depthFormat = nvrhi::Format::D32;
     InitializeShadowResources(device, fbInfo, *state);
     InitializeSkinnedShadowResources(device, fbInfo, *state);
+    if (ps_r__detail_shadows && detailManager)
+        InitializeGrassShadowResources(device, fbInfo, *state);
     if (!state->initialized)
         return resources;
 
@@ -322,6 +669,7 @@ ShadowPassResources setupShadowPasses(
             data.shadows = &shadows;
             data.geometry = geometry;
             data.passState = state;
+            data.detailManager = detailManager;
         },
         [](const ShadowPassData& data, const framegraph::FrameGraph& fg,
            fg::RenderContext* ctx)
@@ -432,6 +780,35 @@ ShadowPassResources setupShadowPasses(
                     cmdList->setGraphicsState(gfxState);
                     DrawIndexedIndirectCountOrFallback(
                         cmdList, 0, 0, terrainCount);
+                }
+
+                if (ps_r__detail_shadows && data.passState->grassInitialized && data.detailManager
+                    && data.detailManager->generatedInstancesBuffer && data.detailManager->slot_count > 0)
+                {
+                    CullGrassForShadow(cmdList, data.device, *data.passState,
+                        data.detailManager, c, view.viewProjection);
+
+                    auto* dm = data.detailManager;
+                    auto detailGlobalsCB = cache.GetOrCreateVolatileCB(
+                        "ShadowPass", "DetailGlobals",
+                        sizeof(fg::FGDetailManager::DetailFrameConstants), data.device, 16);
+
+                    float windAngleDeg = 0.0f;
+                    if (g_pGamePersistent)
+                        windAngleDeg = g_pGamePersistent->Environment().CurrentEnv.wind_direction;
+
+                    fg::FGDetailManager::DetailFrameConstants fc = {};
+                    fc.wave.set(1.0f / 5.0f, 1.0f / 7.0f, 1.0f / 3.0f, Device.fTimeGlobal);
+                    fc.g_wind_direction.set(windAngleDeg, dm->windSpeed, 0.0f, 0.0f);
+                    fc.grass_wind_displacement = ps_r3_grass_wind_displacement;
+                    fc.grass_interaction_displacement = ps_r3_grass_interaction_displacement;
+                    fc.grass_blade_height = ps_r3_grass_blade_height;
+                    fc.buildDetailsIndex = dm->buildDetailsBindlessIndex;
+                    fc.buildDetailsPbrIndex = dm->buildDetailsPbrBindlessIndex;
+                    cmdList->writeBuffer(detailGlobalsCB, &fc, sizeof(fc));
+
+                    RenderGrassShadows(cmdList, data.device, framebuffer, shadowCBBuffer,
+                        detailGlobalsCB, *data.passState, dm, c, data.smapSize);
                 }
 
                 if (data.passState->skinnedInitialized && data.geometry)
