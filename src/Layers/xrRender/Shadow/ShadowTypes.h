@@ -6,8 +6,8 @@
 #include "xrCommon/xr_vector.h"
 #include "Layers/xrRender/FrameGraph/FGTypes.h"
 
-namespace xray::render::fg {
-class GeometryBatch;
+namespace xray::render {
+struct GeometryBatch;
 }
 
 namespace xray::render::shadow {
@@ -52,7 +52,7 @@ struct ShadowView
     float farDistance = 0.0f;
 
     ShadowTextureSlice target;
-    xr_vector<fg::GeometryBatch*> visibleCasters;
+    xr_vector<xray::render::GeometryBatch*> visibleCasters;
 
     string64 debugName = {};
 };

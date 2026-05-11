@@ -11,11 +11,25 @@ namespace xray::render::shadow {
 class ShadowManager;
 }
 
+namespace xray::render {
+class GeometryCollector;
+}
+
 namespace xray::render::fg {
 class RenderDevice;
 }
 
 namespace xray::render::fg::passes {
+
+struct ShadowPassState
+{
+    bool initialized = false;
+    nvrhi::ShaderHandle shadowVS;
+    nvrhi::ShaderHandle shadowPS;
+    nvrhi::InputLayoutHandle shadowInputLayout;
+    nvrhi::BindingLayoutHandle shadowBindingLayout;
+    nvrhi::GraphicsPipelineHandle shadowPipeline;
+};
 
 struct ShadowPassResources
 {
@@ -26,6 +40,8 @@ struct ShadowPassResources
 ShadowPassResources setupShadowPasses(
     framegraph::FrameGraph& fg,
     shadow::ShadowManager& shadows,
-    RenderDevice* device);
+    RenderDevice* device,
+    const GeometryCollector* geometry,
+    ShadowPassState* state);
 
 }

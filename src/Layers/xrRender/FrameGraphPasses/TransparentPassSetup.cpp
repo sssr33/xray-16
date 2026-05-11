@@ -15,6 +15,8 @@
 #include "Layers/xrRender/FrameGraph/BindingSetBuilder.h"
 #include "PassCommon.h"
 #include "Layers/xrRender/ClusteredLightManager.h"
+#include "Layers/xrRender/Shadow/ShadowTypes.h"
+#include "Layers/xrRender/Shadow/ShadowManager.h"
 
 namespace xray::render::fg::passes {
 
@@ -195,7 +197,17 @@ framegraph::DefaultOutputLayout setupTransparentPass(
             bsb.BufferSRV("g_ClusterGrid", ClusteredLightManager::Instance().GetClusterGridBuffer());
             bsb.BufferSRV("g_LightIndexList", ClusteredLightManager::Instance().GetLightIndexListBuffer());
 
-            auto bindingSet = framegraph::GetPassResourceCache().GetOrCreateBindingSet(bsb.Build(), data.passState->layout, nvDevice);
+            auto shadowCBBuffer = cache.GetOrCreateVolatileCB(
+                "Transparent", "SunShadowCB", sizeof(shadow::GpuSunShadowData), data.device);
+            auto* shadowMgr = xray::render::fg::RImplementation.GetShadowManager();
+            if (shadowMgr) {
+                auto& gpuShadow = shadowMgr->GetGpuData();
+                cmdList->writeBuffer(shadowCBBuffer, &gpuShadow, sizeof(gpuShadow));
+            }
+            bsb.ConstantBuffer("SunShadowCB", shadowCBBuffer);
+            bsb.Texture("g_SunShadowArray", cache.GetDummyShadowMap(nvDevice));
+
+            auto bindingSet = cache.GetOrCreateBindingSet(bsb.Build(), data.passState->layout, nvDevice);
             R_ASSERT2(bindingSet, "Transparent binding set creation failed");
 
             nvrhi::GraphicsState state;

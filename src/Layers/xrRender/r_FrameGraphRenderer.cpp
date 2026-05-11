@@ -100,6 +100,7 @@
 #include "xrEngine/IPerformanceAlert.hpp"
 #include "xrCore/PostProcess/PPInfo.hpp"
 #include "Layers/xrRender/Shadow/ShadowManager.h"
+#include "Layers/xrRender/FrameGraphPasses/ShadowPassSetup.h"
 
 namespace xray::render::fg { xray::render::FrameGraphRenderer RImplementation; }
 
@@ -251,6 +252,7 @@ bool FrameGraphRenderer::Initialize(fg::RenderDevice* device) {
     m_rtAccelMgr = xr_make_unique<fg::RTAccelStructManager>();
     m_smokeTrailManager = xr_make_unique<fg::passes::SmokeTrailManager>();
     m_shadowManager = xr_make_unique<shadow::ShadowManager>();
+    m_shadowPassState = xr_make_unique<fg::passes::ShadowPassState>();
 
 
     bindless::MaterialBuffer::Instance().Initialize(m_device);
@@ -365,6 +367,7 @@ void FrameGraphRenderer::Shutdown() {
         m_shadowManager->Shutdown();
         m_shadowManager = nullptr;
     }
+    m_shadowPassState = nullptr;
 
     fg::ClusteredLightManager::Instance().Shutdown();
 
@@ -884,8 +887,12 @@ void FrameGraphRenderer::SetupFrame() {
 
     m_geometryCollector->EndFrame();
 
-    if (m_shadowManager)
+    if (m_shadowManager) {
         m_shadowManager->BeginFrame();
+        m_shadowManager->BuildSunCascades();
+        if (m_shadowManager->IsActive())
+            m_shadowManager->CullCasters(*m_geometryCollector);
+    }
 }
 
 framegraph::VirtualResourceHandle FrameGraphRenderer::CreateRT(
@@ -1254,6 +1261,16 @@ void FrameGraphRenderer::SetupFrameGraphPasses() {
         );
     }
 
+    passes::ShadowPassResources shadowResources;
+    if (m_shadowManager && m_shadowManager->IsActive()) {
+        shadowResources = passes::setupShadowPasses(
+            *m_framegraph,
+            *m_shadowManager,
+            m_device,
+            m_geometryCollector.get(),
+            m_shadowPassState.get());
+    }
+
     auto forwardOutputs = passes::setupForwardColorPass(
         *m_framegraph,
         m_device,
@@ -1268,7 +1285,8 @@ void FrameGraphRenderer::SetupFrameGraphPasses() {
         height,
         drawArgsBuffer,
         bindlessConfig,
-        &m_blackboard->get_or_add<passes::ForwardColorPassState>()
+        &m_blackboard->get_or_add<passes::ForwardColorPassState>(),
+        shadowResources.sunShadowArray
     );
 
     // ═══════════════════════════════════════════════════════

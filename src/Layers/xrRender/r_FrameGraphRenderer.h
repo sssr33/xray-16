@@ -66,6 +66,10 @@ namespace xray::render::shadow {
     class ShadowManager;
 }
 
+namespace xray::render::fg::passes {
+    struct ShadowPassState;
+}
+
 namespace xray::render::fg {
     class ImGuiRendererNVRHI;
 }
@@ -282,6 +286,9 @@ public:
 
     // Detail Manager accessor (for level loading integration)
     fg::FGDetailManager* GetDetailManager() const { return m_detailManager.get(); }
+
+    // Shadow Manager accessor
+    shadow::ShadowManager* GetShadowManager() const { return m_shadowManager.get(); }
 
     // Decal Manager accessor (for wallmark routing)
     fg::decals::DecalManager* GetDecalManager() const { return m_decalManager.get(); }
@@ -534,6 +541,7 @@ private:
     xr_unique_ptr<fg::passes::SmokeTrailManager> m_smokeTrailManager;
 
     xr_unique_ptr<shadow::ShadowManager> m_shadowManager;
+    xr_unique_ptr<fg::passes::ShadowPassState> m_shadowPassState;
 
     // Ray Tracing acceleration structures (for path tracer)
     xr_unique_ptr<fg::RTAccelStructManager> m_rtAccelMgr;

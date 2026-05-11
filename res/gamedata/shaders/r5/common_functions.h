@@ -250,9 +250,15 @@ f_forward output_forward_pbr(
 	float3 V = normalize(eye_position - worldPos);
 	float3 L = normalize(-L_sun_dir_w);
 
+	float shadow = 1.0;
+#ifdef CSM_SHADOW_FORWARD
+	float viewDepth = mul(m_V, float4(worldPos, 1.0)).z;
+	shadow = SampleSunShadow(worldPos, N, viewDepth);
+#endif
+
 	float3 sunLight = PBRDirectLighting(
 		albedo, N, V, L,
-		L_sun_color,
+		L_sun_color * shadow,
 		metallic, roughness, (uint)pbr_diffuse_mode
 	);
 

@@ -132,6 +132,7 @@ struct ForwardColorPassData {
     framegraph::VirtualResourceHandle baseColor;
     framegraph::VirtualResourceHandle worldPos;
     framegraph::VirtualResourceHandle drawArgsBuffer;
+    framegraph::VirtualResourceHandle shadowArray;
     fg::RenderDevice* device;
     const GeometryCollector* geometry;
     MaterialCache* materialCache;
@@ -140,6 +141,7 @@ struct ForwardColorPassData {
     u32 width;
     u32 height;
     BindlessForwardConfig bindlessConfig;
+    bool hasShadows = false;
 };
 
 void InitializeForwardResources(fg::RenderDevice* device, const nvrhi::FramebufferInfoEx& fbInfo, ForwardColorPassState& state);
@@ -161,7 +163,8 @@ framegraph::DefaultOutputLayout setupForwardColorPass(
     u32 height,
     framegraph::VirtualResourceHandle drawArgsBuffer = framegraph::VirtualResourceHandle(),
     const BindlessForwardConfig& bindlessConfig = BindlessForwardConfig(),
-    ForwardColorPassState* state = nullptr
+    ForwardColorPassState* state = nullptr,
+    framegraph::VirtualResourceHandle shadowArrayInput = framegraph::VirtualResourceHandle()
 );
 
 } // namespace xray::render::fg::passes

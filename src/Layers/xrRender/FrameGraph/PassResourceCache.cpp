@@ -165,7 +165,7 @@ nvrhi::ISampler* PassResourceCache::GetSamplerByName(const char* smpName, nvrhi:
         return GetLinearClampSampler(device);
     if (strstr(smpName, "smp_base") || strstr(smpName, "smp_material") || strstr(smpName, "smp_bump"))
         return GetAnisoWrapSampler(device);
-    if (strstr(smpName, "smp_shadowcmp"))
+    if (strstr(smpName, "smp_shadowcmp") || strstr(smpName, "s_ShadowCmp"))
         return GetShadowCmpSampler(device);
     return GetLinearWrapSampler(device);
 }
