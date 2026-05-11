@@ -1063,6 +1063,52 @@ void GPUCullingManager::CreateCompactionResources(fg::RenderDevice* device)
     m_compactEnabled = true;
     Msg("* [GPUCulling] Compaction resources created");
 
+    static constexpr u32 NUM_SHADOW_CASCADES = 4;
+
+    auto createShadowBuffers = [&](CullSetBuffers& set, const char* prefix) {
+        if (set.maxObjects == 0)
+            return;
+
+        {
+            nvrhi::BufferDesc desc;
+            desc.debugName = xr_string(prefix) + "_ShadowDrawArgs";
+            desc.byteSize = set.maxObjects * sizeof(IndirectDrawArgs) * NUM_SHADOW_CASCADES;
+            desc.structStride = sizeof(IndirectDrawArgs);
+            desc.canHaveUAVs = true;
+            desc.isDrawIndirectArgs = true;
+            desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+            desc.keepInitialState = true;
+            set.shadowDrawArgsBuffer = nvDevice->createBuffer(desc);
+        }
+
+        {
+            nvrhi::BufferDesc desc;
+            desc.debugName = xr_string(prefix) + "_IdentityBatchIndices";
+            desc.byteSize = set.maxObjects * sizeof(u32);
+            desc.structStride = sizeof(u32);
+            desc.initialState = nvrhi::ResourceStates::ShaderResource;
+            desc.keepInitialState = true;
+            set.identityBatchIndicesBuffer = nvDevice->createBuffer(desc);
+        }
+    };
+
+    createShadowBuffers(m_staticSet, "GPUCull_Static");
+    createShadowBuffers(m_dynamicSet, "GPUCull_Dynamic");
+
+    if (m_maxTerrainObjects > 0) {
+        nvrhi::BufferDesc desc;
+        desc.debugName = "GPUCull_TerrainShadowDrawArgs";
+        desc.byteSize = m_maxTerrainObjects * sizeof(IndirectDrawArgs) * NUM_SHADOW_CASCADES;
+        desc.structStride = sizeof(IndirectDrawArgs);
+        desc.canHaveUAVs = true;
+        desc.isDrawIndirectArgs = true;
+        desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        desc.keepInitialState = true;
+        m_terrainShadowDrawArgsBuffer = nvDevice->createBuffer(desc);
+    }
+
+    Msg("* [GPUCulling] Shadow draw args buffers created");
+
     // ───────────────────────────────────────────────────────
     //  TERRAIN APPLY VISIBILITY PIPELINE
     // ───────────────────────────────────────────────────────
@@ -1794,6 +1840,26 @@ void GPUCullingManager::UploadSceneObjects(fg::RenderContext* ctx, const Geometr
         m_staticSet.drawArgsUploaded = true;
         m_staticDataCached = true;
 
+        if (m_staticSet.shadowDrawArgsBuffer) {
+            static constexpr u32 NUM_SHADOW_CASCADES = 4;
+            xr_vector<IndirectDrawArgs> shadowArgs(m_staticSet.objectCount * NUM_SHADOW_CASCADES);
+            for (u32 c = 0; c < NUM_SHADOW_CASCADES; ++c)
+                for (u32 i = 0; i < m_staticSet.objectCount; ++i)
+                {
+                    shadowArgs[c * m_staticSet.objectCount + i] = m_staticDrawArgsData[i];
+                    shadowArgs[c * m_staticSet.objectCount + i].startInstanceLocation = i;
+                }
+            cmdList->writeBuffer(m_staticSet.shadowDrawArgsBuffer,
+                shadowArgs.data(), shadowArgs.size() * sizeof(IndirectDrawArgs));
+        }
+
+        if (m_staticSet.identityBatchIndicesBuffer) {
+            xr_vector<u32> identity(m_staticSet.objectCount);
+            for (u32 i = 0; i < m_staticSet.objectCount; ++i) identity[i] = i;
+            cmdList->writeBuffer(m_staticSet.identityBatchIndicesBuffer,
+                identity.data(), identity.size() * sizeof(u32));
+        }
+
         Msg("* [GPUCulling] Static object data uploaded: %u objects", m_staticSet.objectCount);
     }
 
@@ -1891,6 +1957,19 @@ void GPUCullingManager::UploadSceneObjects(fg::RenderContext* ctx, const Geometr
                     identityIndices.data(),
                     m_terrainObjectCount * sizeof(u32));
                 cmdList->setBufferState(m_terrainBatchIndicesBuffer, nvrhi::ResourceStates::ShaderResource);
+            }
+
+            if (m_terrainShadowDrawArgsBuffer) {
+                static constexpr u32 NUM_SHADOW_CASCADES = 4;
+                xr_vector<IndirectDrawArgs> shadowArgs(m_terrainObjectCount * NUM_SHADOW_CASCADES);
+                for (u32 c = 0; c < NUM_SHADOW_CASCADES; ++c)
+                    for (u32 i = 0; i < m_terrainObjectCount; ++i)
+                    {
+                        shadowArgs[c * m_terrainObjectCount + i] = m_terrainDrawArgsData[i];
+                        shadowArgs[c * m_terrainObjectCount + i].startInstanceLocation = i;
+                    }
+                cmdList->writeBuffer(m_terrainShadowDrawArgsBuffer,
+                    shadowArgs.data(), shadowArgs.size() * sizeof(IndirectDrawArgs));
             }
 
             m_staticTerrainDrawArgsUploaded = true;

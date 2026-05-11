@@ -19,6 +19,7 @@ struct VS_OUTPUT
     float4 position : SV_Position;
     float2 texcoord : TEXCOORD0;
     nointerpolation uint materialID : TEXCOORD1;
+    uint rtArrayIndex : SV_RenderTargetArrayIndex;
 };
 
 struct InstanceData
@@ -33,9 +34,11 @@ StructuredBuffer<InstanceData> g_InstanceData : register(t14);
 StructuredBuffer<uint> g_CompactBatchIndices : register(t15);
 StructuredBuffer<uint> g_CompactMaterialIDs : register(t16);
 
+static const uint NUM_SHADOW_CASCADES = 4;
+
 cbuffer ShadowViewCB : register(b3)
 {
-    float4x4 shadow_lightVP;
+    float4x4 shadow_lightVP[NUM_SHADOW_CASCADES];
     uint shadow_cascadeIdx;
     float shadow_smapSize;
     float2 shadow_padding;
@@ -52,9 +55,10 @@ VS_OUTPUT main(VS_INPUT input)
     uint materialID = g_CompactMaterialIDs[drawID];
 
     float4 worldPos = mul(worldMatrix, float4(input.position.xyz, 1.0));
-    output.position = mul(shadow_lightVP, worldPos);
+    output.position = mul(shadow_lightVP[shadow_cascadeIdx], worldPos);
     output.texcoord = input.texcoord;
     output.materialID = materialID;
+    output.rtArrayIndex = shadow_cascadeIdx;
 
     return output;
 }

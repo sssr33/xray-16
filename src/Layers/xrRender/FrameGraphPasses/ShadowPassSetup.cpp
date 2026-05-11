@@ -30,9 +30,11 @@ extern ENGINE_API float ps_r3_grass_blade_height;
 
 namespace xray::render::fg::passes {
 
+static constexpr u32 NUM_SHADOW_CASCADES = 4;
+
 struct alignas(16) ShadowViewCB
 {
-    Fmatrix lightVP;
+    Fmatrix lightVP[NUM_SHADOW_CASCADES];
     u32 cascadeIndex;
     float smapSize;
     float padding[2];
@@ -599,6 +601,102 @@ static void RenderGrassShadows(
     }
 }
 
+struct alignas(16) ShadowObjectCullParams {
+    Fvector4 cascadeFrustumPlanes[6 * NUM_SHADOW_CASCADES];
+    u32 objectCount;
+    u32 numCascades;
+    u32 pad[2];
+};
+
+static void InitializeObjectShadowCullResources(
+    fg::RenderDevice* device,
+    ShadowPassState& state)
+{
+    if (state.objectCullInitialized)
+        return;
+
+    nvrhi::IDevice* nvDevice = device->GetNVRHIDevice();
+    auto* shaderLoader = GEnv.Render->GetShaderLoader();
+    auto& cache = framegraph::GetPassResourceCache();
+
+    auto csResult = shaderLoader->LoadComputeShader("shadow_object_cull", "main");
+    if (!csResult.handle) {
+        Msg("! [ShadowPass] Failed to load shadow_object_cull.cs");
+        return;
+    }
+
+    state.objectShadowCullLayout = cache.GetOrCreateBindingLayoutFromReflection(
+        "ShadowObjectCull", *csResult.reflection, nvDevice);
+
+    nvrhi::ComputePipelineDesc cpDesc;
+    cpDesc.CS = csResult.handle;
+    cpDesc.bindingLayouts = { state.objectShadowCullLayout };
+    state.objectShadowCullPipeline = nvDevice->createComputePipeline(cpDesc);
+
+    state.objectCullInitialized = true;
+    Msg("* [ShadowPass] Object shadow cull pipeline initialized");
+}
+
+static void CullObjectsForShadows(
+    nvrhi::ICommandList* cmdList,
+    fg::RenderDevice* renderDevice,
+    const ShadowPassState& passState,
+    nvrhi::IBuffer* objectBuffer,
+    nvrhi::IBuffer* shadowDrawArgsBuffer,
+    u32 objectCount,
+    u32 cascadeCount,
+    const Fmatrix cascadeLightVPs[NUM_SHADOW_CASCADES],
+    const char* debugName)
+{
+    if (!passState.objectShadowCullPipeline || !objectBuffer || !shadowDrawArgsBuffer || objectCount == 0)
+        return;
+
+    nvrhi::IDevice* nvDevice = renderDevice->GetNVRHIDevice();
+    auto& cache = framegraph::GetPassResourceCache();
+
+    ShadowObjectCullParams params = {};
+    for (u32 c = 0; c < cascadeCount; c++)
+    {
+        Fmatrix vp = cascadeLightVPs[c];
+        CFrustum frustum;
+        frustum.CreateFromMatrix(vp, FRUSTUM_P_LRTB | FRUSTUM_P_FAR);
+        u32 planeCount = std::min<u32>(static_cast<u32>(frustum.p_count), 6);
+        for (u32 i = 0; i < 6; i++)
+        {
+            u32 idx = c * 6 + i;
+            if (i < planeCount)
+                params.cascadeFrustumPlanes[idx].set(
+                    frustum.planes[i].n.x, frustum.planes[i].n.y,
+                    frustum.planes[i].n.z, frustum.planes[i].d);
+            else
+                params.cascadeFrustumPlanes[idx].set(0, 0, 0, -1000000.0f);
+        }
+    }
+    params.objectCount = objectCount;
+    params.numCascades = cascadeCount;
+
+    auto cullParamsCB = cache.GetOrCreateVolatileCB(
+        "ShadowObjectCull", debugName, sizeof(ShadowObjectCullParams), renderDevice, 16);
+    cmdList->writeBuffer(cullParamsCB, &params, sizeof(params));
+
+    auto* csRefl = GEnv.Render->GetShaderLoader()->GetCachedReflection("shadow_object_cull", ".cs");
+    if (!csRefl) return;
+
+    framegraph::BindingSetBuilder bsb(*csRefl, nvDevice, debugName);
+    bsb.ConstantBuffer("ShadowCullParams", cullParamsCB);
+    bsb.BufferSRV("g_Objects", objectBuffer);
+    bsb.BufferUAV("g_ShadowDrawArgs", shadowDrawArgsBuffer);
+
+    auto bindingSet = cache.GetOrCreateBindingSet(
+        bsb.Build(), passState.objectShadowCullLayout, nvDevice);
+
+    nvrhi::ComputeState cs;
+    cs.pipeline = passState.objectShadowCullPipeline;
+    cs.bindings = { bindingSet };
+    cmdList->setComputeState(cs);
+    cmdList->dispatch((objectCount + 255) / 256, 1, 1);
+}
+
 struct ShadowPassData
 {
     framegraph::VirtualResourceHandle shadowArray;
@@ -632,6 +730,7 @@ ShadowPassResources setupShadowPasses(
     fbInfo.depthFormat = nvrhi::Format::D32;
     InitializeShadowResources(device, fbInfo, *state);
     InitializeSkinnedShadowResources(device, fbInfo, *state);
+    InitializeObjectShadowCullResources(device, *state);
     if (ps_r__detail_shadows && detailManager)
         InitializeGrassShadowResources(device, fbInfo, *state);
     if (!state->initialized)
@@ -697,8 +796,48 @@ ShadowPassResources setupShadowPasses(
             auto shadowCBBuffer = cache.GetOrCreateVolatileCB(
                 "ShadowPass", "ShadowViewCB", sizeof(ShadowViewCB), data.device, 16);
 
+            ShadowViewCB shadowCB = {};
+            for (u32 c = 0; c < data.cascadeCount; ++c)
+                shadowCB.lightVP[c] = data.shadows->GetView(c).viewProjection;
+            shadowCB.smapSize = static_cast<float>(data.smapSize);
+
             float smapSizeF = static_cast<float>(data.smapSize);
             nvrhi::Viewport smapViewport(0.0f, smapSizeF, 0.0f, smapSizeF, 0.0f, 1.0f);
+
+            u32 staticCount = gpuCulling->GetStaticObjectCount();
+
+            framegraph::BindingSetBuilder bsb(*vsRefl, *psRefl, nvDevice, "ShadowPass");
+            bsb.ConstantBuffer("ShadowViewCB", shadowCBBuffer);
+            bsb.BufferSRV("g_Materials", matBuffer.GetBuffer());
+            bsb.BufferSRV("g_InstanceData", gpuCulling->GetStaticInstanceBuffer());
+            bsb.BufferSRV("g_CompactBatchIndices",
+                gpuCulling->GetStaticIdentityBatchIndicesBuffer()
+                    ? gpuCulling->GetStaticIdentityBatchIndicesBuffer()
+                    : gpuCulling->GetStaticCompactBatchIndicesBuffer());
+            bsb.BufferSRV("g_CompactMaterialIDs", gpuCulling->GetStaticMaterialIDBuffer());
+
+            auto staticBindingSet = cache.GetOrCreateBindingSet(
+                bsb.Build(), data.passState->shadowBindingLayout, nvDevice);
+
+            if (data.passState->objectCullInitialized)
+            {
+                Fmatrix cascadeVPs[NUM_SHADOW_CASCADES];
+                for (u32 c = 0; c < data.cascadeCount; ++c)
+                    cascadeVPs[c] = shadowCB.lightVP[c];
+
+                if (staticCount > 0 && gpuCulling->GetStaticShadowDrawArgsBuffer())
+                    CullObjectsForShadows(cmdList, data.device, *data.passState,
+                        gpuCulling->GetStaticObjectBuffer(),
+                        gpuCulling->GetStaticShadowDrawArgsBuffer(),
+                        staticCount, data.cascadeCount, cascadeVPs, "StaticShadowCull");
+
+                u32 terrainCount = gpuCulling->GetTerrainObjectCount();
+                if (terrainCount > 0 && gpuCulling->GetTerrainShadowDrawArgsBuffer())
+                    CullObjectsForShadows(cmdList, data.device, *data.passState,
+                        gpuCulling->GetTerrainObjectBuffer(),
+                        gpuCulling->GetTerrainShadowDrawArgsBuffer(),
+                        terrainCount, data.cascadeCount, cascadeVPs, "TerrainShadowCull");
+            }
 
             for (u32 c = 0; c < data.cascadeCount; ++c)
             {
@@ -719,74 +858,71 @@ ShadowPassResources setupShadowPasses(
 
                 cmdList->clearDepthStencilTexture(shadowArrayTex, sliceSubresource, true, 1.0f, false, 0);
 
-                const auto& view = data.shadows->GetView(c);
-
-                ShadowViewCB shadowCB;
-                shadowCB.lightVP = view.viewProjection;
                 shadowCB.cascadeIndex = c;
-                shadowCB.smapSize = smapSizeF;
-                shadowCB.padding[0] = 0;
-                shadowCB.padding[1] = 0;
                 cmdList->writeBuffer(shadowCBBuffer, &shadowCB, sizeof(shadowCB));
 
-                framegraph::BindingSetBuilder bsb(*vsRefl, *psRefl, nvDevice, "ShadowPass");
-                bsb.ConstantBuffer("ShadowViewCB", shadowCBBuffer);
-                bsb.BufferSRV("g_Materials", matBuffer.GetBuffer());
-                bsb.BufferSRV("g_InstanceData", gpuCulling->GetStaticInstanceBuffer());
-                bsb.BufferSRV("g_CompactBatchIndices", gpuCulling->GetStaticCompactBatchIndicesBuffer());
-                bsb.BufferSRV("g_CompactMaterialIDs", gpuCulling->GetStaticCompactMaterialIDBuffer());
+                if (staticCount > 0 && gpuCulling->GetStaticShadowDrawArgsBuffer())
+                {
+                    nvrhi::GraphicsState gfxState;
+                    gfxState.pipeline = data.passState->shadowPipeline;
+                    gfxState.framebuffer = framebuffer;
+                    gfxState.vertexBuffers = {
+                        { gpuCulling->GetMegaVertexBuffer(), 0, 0 },
+                        { drawIndexBuffer, 1, 0 }
+                    };
+                    gfxState.indexBuffer = { gpuCulling->GetMegaIndexBuffer(), nvrhi::Format::R32_UINT, 0 };
+                    gfxState.viewport.addViewport(smapViewport);
+                    gfxState.viewport.addScissorRect(nvrhi::Rect(data.smapSize, data.smapSize));
+                    gfxState.bindings = { staticBindingSet };
+                    if (bindlessTable)
+                        gfxState.addBindingSet(bindlessTable);
+                    gfxState.indirectParams = gpuCulling->GetStaticShadowDrawArgsBuffer();
 
-                auto bindingSet = cache.GetOrCreateBindingSet(
-                    bsb.Build(), data.passState->shadowBindingLayout, nvDevice);
+                    cmdList->setGraphicsState(gfxState);
 
-                nvrhi::GraphicsState gfxState;
-                gfxState.pipeline = data.passState->shadowPipeline;
-                gfxState.framebuffer = framebuffer;
-                gfxState.vertexBuffers = {
-                    { gpuCulling->GetMegaVertexBuffer(), 0, 0 },
-                    { drawIndexBuffer, 1, 0 }
-                };
-                gfxState.indexBuffer = { gpuCulling->GetMegaIndexBuffer(), nvrhi::Format::R32_UINT, 0 };
-                gfxState.viewport.addViewport(smapViewport);
-                gfxState.viewport.addScissorRect(nvrhi::Rect(data.smapSize, data.smapSize));
-                gfxState.bindings = { bindingSet };
-                if (bindlessTable)
-                    gfxState.addBindingSet(bindlessTable);
-                gfxState.indirectParams = gpuCulling->GetStaticCompactDrawArgsBuffer();
-
-                cmdList->setGraphicsState(gfxState);
-
-                DrawIndexedIndirectCountOrFallback(
-                    cmdList, 0, 0, gpuCulling->GetStaticObjectCount());
+                    u32 argsOffset = c * staticCount * sizeof(IndirectDrawArgs);
+                    cmdList->drawIndexedIndirect(argsOffset, staticCount);
+                }
 
                 u32 terrainCount = gpuCulling->GetTerrainObjectCount();
-                if (terrainCount > 0 && gpuCulling->GetTerrainCompactDrawArgsBuffer())
+                if (terrainCount > 0 && gpuCulling->GetTerrainShadowDrawArgsBuffer())
                 {
                     framegraph::BindingSetBuilder terrBsb(*vsRefl, *psRefl, nvDevice, "ShadowPass.Terrain");
                     terrBsb.ConstantBuffer("ShadowViewCB", shadowCBBuffer);
                     terrBsb.BufferSRV("g_Materials", matBuffer.GetBuffer());
                     terrBsb.BufferSRV("g_InstanceData", gpuCulling->GetTerrainInstanceBuffer());
-                    terrBsb.BufferSRV("g_CompactBatchIndices", gpuCulling->GetTerrainCompactBatchIndicesBuffer());
-                    terrBsb.BufferSRV("g_CompactMaterialIDs", gpuCulling->GetTerrainCompactMaterialIDBuffer());
+                    terrBsb.BufferSRV("g_CompactBatchIndices", gpuCulling->GetTerrainBatchIndicesBuffer());
+                    terrBsb.BufferSRV("g_CompactMaterialIDs", gpuCulling->GetTerrainMaterialIDBuffer());
 
                     auto terrBindingSet = cache.GetOrCreateBindingSet(
                         terrBsb.Build(), data.passState->shadowBindingLayout, nvDevice);
 
-                    gfxState.bindings = { terrBindingSet };
+                    nvrhi::GraphicsState terrState;
+                    terrState.pipeline = data.passState->shadowPipeline;
+                    terrState.framebuffer = framebuffer;
+                    terrState.vertexBuffers = {
+                        { gpuCulling->GetMegaVertexBuffer(), 0, 0 },
+                        { drawIndexBuffer, 1, 0 }
+                    };
+                    terrState.indexBuffer = { gpuCulling->GetMegaIndexBuffer(), nvrhi::Format::R32_UINT, 0 };
+                    terrState.viewport.addViewport(smapViewport);
+                    terrState.viewport.addScissorRect(nvrhi::Rect(data.smapSize, data.smapSize));
+                    terrState.bindings = { terrBindingSet };
                     if (bindlessTable)
-                        gfxState.addBindingSet(bindlessTable);
-                    gfxState.indirectParams = gpuCulling->GetTerrainCompactDrawArgsBuffer();
+                        terrState.addBindingSet(bindlessTable);
+                    terrState.indirectParams = gpuCulling->GetTerrainShadowDrawArgsBuffer();
 
-                    cmdList->setGraphicsState(gfxState);
-                    DrawIndexedIndirectCountOrFallback(
-                        cmdList, 0, 0, terrainCount);
+                    cmdList->setGraphicsState(terrState);
+
+                    u32 terrArgsOffset = c * terrainCount * sizeof(IndirectDrawArgs);
+                    cmdList->drawIndexedIndirect(terrArgsOffset, terrainCount);
                 }
 
                 if (ps_r__detail_shadows && data.passState->grassInitialized && data.detailManager
                     && data.detailManager->generatedInstancesBuffer && data.detailManager->slot_count > 0)
                 {
                     CullGrassForShadow(cmdList, data.device, *data.passState,
-                        data.detailManager, c, view.viewProjection);
+                        data.detailManager, c, shadowCB.lightVP[c]);
 
                     auto* dm = data.detailManager;
                     auto detailGlobalsCB = cache.GetOrCreateVolatileCB(
@@ -945,7 +1081,7 @@ ShadowPassResources setupShadowPasses(
                 auto& matBuffer = fg::bindless::MaterialBuffer::Instance();
 
                 ShadowViewCB shadowCB;
-                shadowCB.lightVP = data.lightVP;
+                shadowCB.lightVP[0] = data.lightVP;
                 shadowCB.cascadeIndex = 0;
                 shadowCB.smapSize = static_cast<float>(data.smapSize);
                 shadowCB.padding[0] = 0;

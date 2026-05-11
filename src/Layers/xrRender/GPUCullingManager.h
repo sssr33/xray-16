@@ -316,12 +316,22 @@ public:
     nvrhi::IBuffer* GetStaticDrawArgsBuffer() const { return m_staticSet.drawArgsBuffer.Get(); }
     nvrhi::IBuffer* GetDynamicDrawArgsBuffer() const { return m_dynamicSet.drawArgsBuffer.Get(); }
 
+    nvrhi::IBuffer* GetStaticObjectBuffer() const { return m_staticSet.objectBuffer.Get(); }
+    nvrhi::IBuffer* GetStaticShadowDrawArgsBuffer() const { return m_staticSet.shadowDrawArgsBuffer.Get(); }
+    nvrhi::IBuffer* GetStaticIdentityBatchIndicesBuffer() const { return m_staticSet.identityBatchIndicesBuffer.Get(); }
+    nvrhi::IBuffer* GetStaticMaterialIDBuffer() const { return m_staticSet.materialIDBuffer.Get(); }
+
+    nvrhi::IBuffer* GetDynamicObjectBuffer() const { return m_dynamicSet.objectBuffer.Get(); }
+    nvrhi::IBuffer* GetDynamicShadowDrawArgsBuffer() const { return m_dynamicSet.shadowDrawArgsBuffer.Get(); }
+
     // ───────────────────────────────────────────────────────
     //  TERRAIN-SPECIFIC BUFFERS
     // ───────────────────────────────────────────────────────
     u32 GetTerrainObjectCount() const { return m_terrainObjectCount; }
     nvrhi::IBuffer* GetTerrainDrawArgsBuffer() const { return m_terrainDrawArgsBuffer.Get(); }
     nvrhi::IBuffer* GetTerrainMaterialIDBuffer() const { return m_terrainMaterialIDBuffer.Get(); }
+    nvrhi::IBuffer* GetTerrainObjectBuffer() const { return m_terrainObjectBuffer.Get(); }
+    nvrhi::IBuffer* GetTerrainShadowDrawArgsBuffer() const { return m_terrainShadowDrawArgsBuffer.Get(); }
 
     // ───────────────────────────────────────────────────────
     //  TRANSPARENT-SPECIFIC BUFFERS
@@ -478,6 +488,8 @@ private:
         nvrhi::BufferHandle compactGroupCountsBuffer;   // Visible count per group (scratch)
         nvrhi::BufferHandle compactGroupOffsetsBuffer;  // Prefix offsets per group (scratch)
         nvrhi::BufferHandle instanceBuffer;             // Instance data buffer (GPUInstanceData)
+        nvrhi::BufferHandle shadowDrawArgsBuffer;       // Per-cascade shadow indirect draw args
+        nvrhi::BufferHandle identityBatchIndicesBuffer;  // Identity [0,1,2,...N-1] for shadow VS
         u32 objectCount = 0;
         u32 maxObjects = 0;
         bool drawArgsUploaded = false;
@@ -536,6 +548,7 @@ private:
     // Rendered in separate draw call after regular geometry
     nvrhi::BufferHandle m_terrainObjectBuffer;           // Terrain objects (GPU read)
     nvrhi::BufferHandle m_terrainDrawArgsBuffer;         // Terrain indirect draw args
+    nvrhi::BufferHandle m_terrainShadowDrawArgsBuffer;   // Per-cascade terrain shadow draw args
     nvrhi::BufferHandle m_terrainVisibleIndexBuffer;     // Terrain visible indices
     nvrhi::BufferHandle m_terrainVisibleCountBuffer;     // Terrain atomic counter
     nvrhi::BufferHandle m_terrainVisibilityBuffer;       // Terrain visibility (1 uint per object, like regular geometry)

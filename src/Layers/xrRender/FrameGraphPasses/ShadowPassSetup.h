@@ -71,6 +71,10 @@ struct ShadowPassState
         nvrhi::BufferHandle decalDrawArgsBuffer;
     };
     GrassShadowCascadeBuffers grassShadowCascades[NUM_SHADOW_CASCADES];
+
+    bool objectCullInitialized = false;
+    nvrhi::ComputePipelineHandle objectShadowCullPipeline;
+    nvrhi::BindingLayoutHandle objectShadowCullLayout;
 };
 
 struct ShadowPassResources

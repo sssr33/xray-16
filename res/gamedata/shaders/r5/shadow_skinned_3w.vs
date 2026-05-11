@@ -15,7 +15,7 @@ ShadowSkinnedVS_OUTPUT main(VS_INPUT v)
     float4x4 bone = get_bone(id_0) * w0 + get_bone(id_1) * w1 + get_bone(id_2) * w2;
     float4 skinned = mul(bone, v.P);
     float3 world = mul(m_W, skinned).xyz;
-    o.position = mul(shadow_lightVP, float4(world, 1.0));
+    o.position = mul(shadow_lightVP[shadow_cascadeIdx], float4(world, 1.0));
     o.texcoord = v.tc.xy;
     o.materialID = g_SkinnedMaterialID;
     return o;
