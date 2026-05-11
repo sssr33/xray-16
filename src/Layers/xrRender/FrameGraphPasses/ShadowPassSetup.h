@@ -13,6 +13,7 @@ class ShadowManager;
 
 namespace xray::render {
 class GeometryCollector;
+struct GeometryBatch;
 }
 
 namespace xray::render::fg {
@@ -50,6 +51,7 @@ struct ShadowPassState
 struct ShadowPassResources
 {
     framegraph::VirtualResourceHandle sunShadowArray;
+    framegraph::VirtualResourceHandle hudShadowMap;
     u32 sunCascadeCount = 0;
 };
 
@@ -58,6 +60,7 @@ ShadowPassResources setupShadowPasses(
     shadow::ShadowManager& shadows,
     RenderDevice* device,
     const GeometryCollector* geometry,
-    ShadowPassState* state);
+    ShadowPassState* state,
+    const xr_vector<GeometryBatch>* hudBatches = nullptr);
 
 }

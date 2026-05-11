@@ -255,6 +255,9 @@ f_forward output_forward_pbr(
 	float viewDepth = mul(m_V, float4(worldPos, 1.0)).z;
 	shadow = SampleSunShadow(worldPos, N, viewDepth);
 #endif
+#ifdef HUD_SHADOW_FORWARD
+	shadow *= SampleHUDShadow(worldPos);
+#endif
 
 	float3 sunLight = PBRDirectLighting(
 		albedo, N, V, L,

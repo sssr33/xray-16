@@ -8,6 +8,10 @@ Texture2DArray<float> g_SunShadowArray : register(t23);
 SamplerComparisonState s_ShadowCmp : register(s4);
 #endif
 
+#ifdef HUD_SHADOW_FORWARD
+Texture2D<float> g_HUDShadowMap : register(t24);
+#endif
+
 uint GetCascadeIndex(float viewDepth)
 {
     uint cascadeCount = (uint)shadow_params.x;
@@ -72,6 +76,33 @@ float SampleSunShadow(float3 worldPos, float3 normalWS, float viewDepth)
     }
 
     return shadow;
+}
+
+float SampleHUDShadow(float3 worldPos)
+{
+#ifndef HUD_SHADOW_FORWARD
+    return 1.0;
+#else
+    float4 shadowCoord = mul(shadow_hudWorldToShadowTex, float4(worldPos, 1.0));
+    float2 shadowUV = shadowCoord.xy;
+    float depth = shadowCoord.z;
+
+    if (any(shadowUV < 0.0) || any(shadowUV > 1.0))
+        return 1.0;
+
+    float2 texelSize = 1.0 / float2(2048.0, 2048.0);
+    float shadow = 0.0;
+    [unroll]
+    for (int y = -1; y <= 1; y += 2) {
+        [unroll]
+        for (int x = -1; x <= 1; x += 2) {
+            float2 offset = float2(x, y) * texelSize * 0.5;
+            shadow += g_HUDShadowMap.SampleCmpLevelZero(
+                s_ShadowCmp, shadowUV + offset, depth);
+        }
+    }
+    return shadow * 0.25;
+#endif
 }
 
 #endif

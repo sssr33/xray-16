@@ -272,7 +272,8 @@ ShadowPassResources setupShadowPasses(
     shadow::ShadowManager& shadows,
     RenderDevice* device,
     const GeometryCollector* geometry,
-    ShadowPassState* state)
+    ShadowPassState* state,
+    const xr_vector<GeometryBatch>* hudBatches)
 {
     ShadowPassResources resources;
 
@@ -498,6 +499,150 @@ ShadowPassResources setupShadowPasses(
             }
         }
     );
+
+    if (hudBatches && !hudBatches->empty() && shadows.HasHudShadow() && state->skinnedInitialized)
+    {
+        static constexpr u32 hudSmapSize = 2048;
+
+        framegraph::ResourceDesc hudDesc;
+        hudDesc.type = framegraph::ResourceDesc::Type::Texture2D;
+        hudDesc.width = hudSmapSize;
+        hudDesc.height = hudSmapSize;
+        hudDesc.format = nvrhi::Format::D32;
+        hudDesc.isDepthStencil = true;
+        hudDesc.isTransient = true;
+        hudDesc.debugName = "rt_HUDShadowMap";
+
+        auto hudShadowHandle = fg.CreateTexture("rt_HUDShadowMap", hudDesc);
+
+        struct HudShadowPassData
+        {
+            framegraph::VirtualResourceHandle hudShadowMap;
+            u32 smapSize;
+            Fmatrix lightVP;
+            fg::RenderDevice* device;
+            const xr_vector<GeometryBatch>* hudBatches;
+            ShadowPassState* passState;
+        };
+
+        auto& hudData = fg.addCallbackPass<HudShadowPassData>(
+            "HUDShadowPass",
+            [&, hudShadowHandle](
+                framegraph::FrameGraph& builder,
+                framegraph::PassHandle passHandle,
+                HudShadowPassData& data)
+            {
+                framegraph::RenderPassBuilder passBuilder(builder, passHandle);
+                data.hudShadowMap = passBuilder.write(hudShadowHandle,
+                    framegraph::ResourceState::DepthStencilWrite);
+                data.smapSize = hudSmapSize;
+                data.lightVP = shadows.GetHudView().viewProjection;
+                data.device = device;
+                data.hudBatches = hudBatches;
+                data.passState = state;
+            },
+            [](const HudShadowPassData& data, const framegraph::FrameGraph& fg,
+               fg::RenderContext* ctx)
+            {
+                if (!data.hudBatches || data.hudBatches->empty())
+                    return;
+
+                nvrhi::IDevice* nvDevice = data.device->GetNVRHIDevice();
+                nvrhi::ICommandList* cmdList = ctx->GetCommandList();
+
+                nvrhi::ITexture* hudSmapTex = fg.GetPhysicalTexture(data.hudShadowMap);
+
+                auto& cache = framegraph::GetPassResourceCache();
+
+                nvrhi::FramebufferDesc fbDesc;
+                fbDesc.setDepthAttachment(nvrhi::FramebufferAttachment().setTexture(hudSmapTex));
+                auto framebuffer = cache.GetOrCreateFramebuffer("HUDShadow", fbDesc, nvDevice);
+
+                cmdList->clearDepthStencilTexture(hudSmapTex, nvrhi::AllSubresources, true, 1.0f, false, 0);
+
+                auto* gpuCulling = xray::render::fg::RImplementation.GetGPUCullingManager();
+                auto* globalBoneBuffer = gpuCulling ? gpuCulling->GetGlobalBoneBuffer() : nullptr;
+                if (!globalBoneBuffer)
+                    return;
+
+                auto& matBuffer = fg::bindless::MaterialBuffer::Instance();
+
+                ShadowViewCB shadowCB;
+                shadowCB.lightVP = data.lightVP;
+                shadowCB.cascadeIndex = 0;
+                shadowCB.smapSize = static_cast<float>(data.smapSize);
+                shadowCB.padding[0] = 0;
+                shadowCB.padding[1] = 0;
+
+                auto shadowCBBuffer = cache.GetOrCreateVolatileCB(
+                    "HUDShadow", "ShadowViewCB", sizeof(ShadowViewCB), data.device, 8);
+                cmdList->writeBuffer(shadowCBBuffer, &shadowCB, sizeof(shadowCB));
+
+                auto dynTransCB = cache.GetOrCreateVolatileCB(
+                    "HUDShadow", "DynTrans", sizeof(Fmatrix), data.device, 512);
+                auto skinnedMatCB = cache.GetOrCreateVolatileCB(
+                    "HUDShadow", "SkinnedMat", sizeof(SkinnedMaterialCB), data.device, 512);
+
+                float smapSizeF = static_cast<float>(data.smapSize);
+                nvrhi::Viewport smapViewport(0.0f, smapSizeF, 0.0f, smapSizeF, 0.0f, 1.0f);
+
+                auto* backend = data.device->GetBackend();
+                nvrhi::IBindingSet* bindlessTable = backend ? backend->GetBindlessDescriptorTable() : nullptr;
+
+                for (const auto& batch : *data.hudBatches)
+                {
+                    if (!batch.isSkinned || !batch.vertexBuffer || !batch.indexBuffer)
+                        continue;
+
+                    auto* skPipeline = SelectSkinnedShadowPipeline(
+                        *data.passState, batch.vertexStride, batch.skinningRenderMode);
+                    if (!skPipeline)
+                        continue;
+
+                    u32 boneOffset = GetShadowSkeletonBoneOffset(cmdList, *gpuCulling, batch);
+
+                    Fmatrix worldMat = batch.worldMatrix;
+                    cmdList->writeBuffer(dynTransCB, &worldMat, sizeof(worldMat));
+
+                    SkinnedMaterialCB matCB = {};
+                    matCB.materialID = batch.bindlessMaterialID;
+                    matCB.skeletonBoneOffset = boneOffset;
+                    cmdList->writeBuffer(skinnedMatCB, &matCB, sizeof(matCB));
+
+                    nvrhi::BindingSetDesc skBindDesc;
+                    skBindDesc.bindings = {
+                        nvrhi::BindingSetItem::ConstantBuffer(0, dynTransCB),
+                        nvrhi::BindingSetItem::ConstantBuffer(3, shadowCBBuffer),
+                        nvrhi::BindingSetItem::ConstantBuffer(4, skinnedMatCB),
+                        nvrhi::BindingSetItem::StructuredBuffer_SRV(3, globalBoneBuffer),
+                        nvrhi::BindingSetItem::StructuredBuffer_SRV(8, matBuffer.GetBuffer()),
+                        nvrhi::BindingSetItem::Sampler(0, cache.GetAnisoWrapSampler(nvDevice)),
+                    };
+                    auto skBindingSet = cache.GetOrCreateBindingSet(
+                        skBindDesc, data.passState->skinnedBindingLayout, nvDevice);
+
+                    nvrhi::GraphicsState skState;
+                    skState.pipeline = skPipeline;
+                    skState.framebuffer = framebuffer;
+                    skState.vertexBuffers = {{ batch.vertexBuffer, 0, 0 }};
+                    skState.indexBuffer = { batch.indexBuffer, nvrhi::Format::R16_UINT, 0 };
+                    skState.viewport.addViewport(smapViewport);
+                    skState.viewport.addScissorRect(nvrhi::Rect(data.smapSize, data.smapSize));
+                    skState.bindings = { skBindingSet };
+                    if (bindlessTable)
+                        skState.addBindingSet(bindlessTable);
+                    skState.indirectParams = nullptr;
+
+                    cmdList->setGraphicsState(skState);
+                    cmdList->drawIndexed(nvrhi::DrawArguments()
+                        .setVertexCount(batch.indexCount)
+                        .setStartIndexLocation(batch.startIndex)
+                        .setStartVertexLocation(batch.baseVertex));
+                }
+            }
+        );
+        resources.hudShadowMap = hudData.hudShadowMap;
+    }
 
     return resources;
 }

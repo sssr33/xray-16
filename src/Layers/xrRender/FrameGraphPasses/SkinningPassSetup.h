@@ -88,6 +88,8 @@ struct SkinningPassData {
     framegraph::VirtualResourceHandle baseColor;
     framegraph::VirtualResourceHandle worldPos;
     framegraph::VirtualResourceHandle depth;
+    framegraph::VirtualResourceHandle shadowMapArray;
+    framegraph::VirtualResourceHandle hudShadowMap;
     fg::RenderDevice* device;
     const GeometryCollector* geometry;
     const xr_vector<GeometryBatch>* hudBatches;
@@ -112,7 +114,9 @@ framegraph::DefaultOutputLayout setupSkinningPass(
     u32 height,
     const SkinnedVisibilityData& visibilityData = {},
     SkinningPassState* state = nullptr,
-    decals::OverlayManager* overlayMgr = nullptr
+    decals::OverlayManager* overlayMgr = nullptr,
+    framegraph::VirtualResourceHandle shadowMapArrayInput = {},
+    framegraph::VirtualResourceHandle hudShadowMapInput = {}
 );
 
 } // namespace xray::render::fg::passes

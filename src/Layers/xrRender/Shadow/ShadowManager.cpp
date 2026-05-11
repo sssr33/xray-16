@@ -49,6 +49,7 @@ void ShadowManager::Shutdown()
 void ShadowManager::BeginFrame()
 {
     m_views.clear();
+    m_hudView = {};
     m_active = false;
 }
 
@@ -162,6 +163,41 @@ void ShadowManager::BuildSunCascades()
         m_gpuData.cascades[c].worldToShadowTex = view.worldToShadowTex;
         m_gpuData.cascades[c].farBound = view.farDistance;
         m_gpuData.cascades[c].texelSize = view.texelSize;
+    }
+
+    {
+        static constexpr float hudMapSize = 2.0f;
+        static constexpr u32 hudSmapSize = 2048;
+
+        Fvector sunPos;
+        sunPos.mad(Device.vCameraPosition, sunDir, -50.0f);
+
+        Fmatrix hudView;
+        hudView.build_camera_dir(sunPos, sunDir, lightUp);
+
+        Fplane lightPlane;
+        lightPlane.build_unit_normal(sunPos, sunDir);
+        float dist = lightPlane.classify(Device.vCameraPosition);
+
+        Fmatrix hudProj;
+        hudProj.build_projection_ortho(hudMapSize, hudMapSize, 0.1f, dist + sqrtf(2.0f) * hudMapSize);
+
+        m_hudView.kind = ShadowViewKind::HudDirectional;
+        m_hudView.view = hudView;
+        m_hudView.projection = hudProj;
+        m_hudView.viewProjection.mul(hudProj, hudView);
+
+        static const Fmatrix texelAdjust = {
+            0.5f,  0.0f,  0.0f,  0.0f,
+            0.0f, -0.5f,  0.0f,  0.0f,
+            0.0f,  0.0f,  1.0f,  0.0f,
+            0.5f,  0.5f,  0.0f,  1.0f
+        };
+        m_hudView.worldToShadowTex.mul(texelAdjust, m_hudView.viewProjection);
+        m_hudView.texelSize = hudMapSize / float(hudSmapSize);
+        xr_sprintf(m_hudView.debugName, "HudShadow");
+
+        m_gpuData.hudWorldToShadowTex = m_hudView.worldToShadowTex;
     }
 
     m_active = true;

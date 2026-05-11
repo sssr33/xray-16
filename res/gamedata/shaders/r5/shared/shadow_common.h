@@ -20,6 +20,7 @@ cbuffer SunShadowCB : register(b3)
     float4 shadow_lightDirWS;
     float4 shadow_params;
     float4 shadow_textureParams;
+    float4x4 shadow_hudWorldToShadowTex;
 };
 
 #endif

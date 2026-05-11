@@ -1268,7 +1268,8 @@ void FrameGraphRenderer::SetupFrameGraphPasses() {
             *m_shadowManager,
             m_device,
             m_geometryCollector.get(),
-            m_shadowPassState.get());
+            m_shadowPassState.get(),
+            &m_hudBatches);
     }
 
     auto forwardOutputs = passes::setupForwardColorPass(
@@ -1336,7 +1337,9 @@ void FrameGraphRenderer::SetupFrameGraphPasses() {
         height,
         skinnedVisibility,
         &m_blackboard->get_or_add<passes::SkinningPassState>(),
-        m_overlayManager.get()
+        m_overlayManager.get(),
+        shadowResources.sunShadowArray,
+        shadowResources.hudShadowMap
     );
 
     // ═══════════════════════════════════════════════════════

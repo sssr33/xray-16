@@ -106,6 +106,7 @@ struct GpuSunShadowData
     Fvector4 lightDirWS;
     Fvector4 shadowParams;
     Fvector4 textureParams;
+    Fmatrix hudWorldToShadowTex;
 };
 
 }

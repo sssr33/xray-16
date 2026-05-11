@@ -27,6 +27,8 @@
 #include "Layers/xrRender/Decals/OverlayManager.h"
 #include "PassCommon.h"
 #include "Layers/xrRender/ClusteredLightManager.h"
+#include "Layers/xrRender/Shadow/ShadowTypes.h"
+#include "Layers/xrRender/Shadow/ShadowManager.h"
 #include "xrCore/FMesh.hpp"
 
 extern ENGINE_API float psHUD_FOV;
@@ -363,7 +365,9 @@ static SkinnedPhaseContext BuildSkinnedPhaseContext(
     nvrhi::IBuffer* splatBuffer,
     const nvrhi::Viewport& viewport,
     const nvrhi::Rect& scissor,
-    bool isHUD)
+    bool isHUD,
+    nvrhi::ITexture* shadowMapTex = nullptr,
+    nvrhi::ITexture* hudShadowMapTex = nullptr)
 {
     using namespace fg;
     using namespace fg::bindless;
@@ -400,6 +404,17 @@ static SkinnedPhaseContext BuildSkinnedPhaseContext(
     bsb.BufferSRV("g_LightData", ClusteredLightManager::Instance().GetLightDataBuffer());
     bsb.BufferSRV("g_ClusterGrid", ClusteredLightManager::Instance().GetClusterGridBuffer());
     bsb.BufferSRV("g_LightIndexList", ClusteredLightManager::Instance().GetLightIndexListBuffer());
+
+    if (isHUD) {
+        auto shadowCBBuffer = cache.GetOrCreateVolatileCB(
+            "SkinningPass", "SunShadowCB", sizeof(shadow::GpuSunShadowData),
+            xray::render::fg::RImplementation.GetRenderDevice());
+        bsb.ConstantBuffer("SunShadowCB", shadowCBBuffer);
+        bsb.Texture("g_SunShadowArray",
+            shadowMapTex ? shadowMapTex : cache.GetDummyShadowMap(nvDevice));
+        bsb.Texture("g_HUDShadowMap",
+            hudShadowMapTex ? hudShadowMapTex : cache.GetDummyShadowMap2D(nvDevice));
+    }
 
     ctx.bindingSet = cache.GetOrCreateBindingSet(bsb.Build(), activeLayout, nvDevice);
     return ctx;
@@ -491,7 +506,9 @@ framegraph::DefaultOutputLayout setupSkinningPass(
     u32 height,
     const SkinnedVisibilityData& visibilityData,
     SkinningPassState* state,
-    decals::OverlayManager* overlayMgr)
+    decals::OverlayManager* overlayMgr,
+    framegraph::VirtualResourceHandle shadowMapArrayInput,
+    framegraph::VirtualResourceHandle hudShadowMapInput)
 {
     using namespace framegraph;
 
@@ -511,7 +528,7 @@ framegraph::DefaultOutputLayout setupSkinningPass(
         // ═══════════════════════════════════════════════════════
         //  SETUP LAMBDA
         // ═══════════════════════════════════════════════════════
-        [&, width, height, visibilityData, state, overlayMgr](FrameGraph& builder, PassHandle passHandle, SkinningPassData& data) {
+        [&, width, height, visibilityData, state, overlayMgr, shadowMapArrayInput, hudShadowMapInput](FrameGraph& builder, PassHandle passHandle, SkinningPassData& data) {
             RenderPassBuilder passBuilder(builder, passHandle);
 
             data.width = width;
@@ -531,6 +548,11 @@ framegraph::DefaultOutputLayout setupSkinningPass(
             if (inputs.worldPos.is_valid())
                 data.worldPos = passBuilder.readWrite(inputs.worldPos, ResourceState::RenderTarget);
             data.depth = passBuilder.readWrite(inputs.depth, ResourceState::DepthStencilWrite);
+
+            if (shadowMapArrayInput.is_valid())
+                data.shadowMapArray = passBuilder.read(shadowMapArrayInput, ResourceState::ShaderResource);
+            if (hudShadowMapInput.is_valid())
+                data.hudShadowMap = passBuilder.read(hudShadowMapInput, ResourceState::ShaderResource);
 
             data.outputs.albedo = data.color;
             data.outputs.normal = data.normal;
@@ -723,11 +745,25 @@ framegraph::DefaultOutputLayout setupSkinningPass(
                     0.0f, 0.1f
                 );
 
+                nvrhi::ITexture* shadowMapTex = data.shadowMapArray.is_valid()
+                    ? fg.GetPhysicalTexture(data.shadowMapArray) : nullptr;
+                nvrhi::ITexture* hudShadowMapTex = data.hudShadowMap.is_valid()
+                    ? fg.GetPhysicalTexture(data.hudShadowMap) : nullptr;
+
+                auto* shadowMgr = xray::render::fg::RImplementation.GetShadowManager();
+                if (shadowMgr) {
+                    auto shadowCBBuffer = cache.GetOrCreateVolatileCB(
+                        "SkinningPass", "SunShadowCB", sizeof(shadow::GpuSunShadowData), data.device);
+                    auto& gpuShadow = shadowMgr->GetGpuData();
+                    cmdList->writeBuffer(shadowCBBuffer, &gpuShadow, sizeof(gpuShadow));
+                }
+
                 SkinnedPhaseContext hudCtx = BuildSkinnedPhaseContext(
                     *data.passState, nvDevice, framebuffer,
                     dynTransformsCB, staticGlobalsCB, materialIdCB,
                     globalBoneBuffer, bindlessTable, bindlessLayout, splatBuffer,
-                    hudViewport, scissor, true);
+                    hudViewport, scissor, true,
+                    shadowMapTex, hudShadowMapTex);
 
                 for (const auto& batch : *data.hudBatches) {
                     Fmatrix adjustedWorldMatrix = ApplyHUDFOVAdjustment(batch.worldMatrix);

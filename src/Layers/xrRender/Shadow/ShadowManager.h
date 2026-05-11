@@ -25,9 +25,11 @@ public:
     void CullCasters(const GeometryCollector& collector);
 
     bool IsActive() const { return m_active; }
+    bool HasHudShadow() const { return m_hudView.kind == ShadowViewKind::HudDirectional; }
     const CascadeShadowConfig& GetConfig() const { return m_config; }
     const xr_vector<ShadowView>& GetViews() const { return m_views; }
     const ShadowView& GetView(u32 index) const { return m_views[index]; }
+    const ShadowView& GetHudView() const { return m_hudView; }
     const GpuSunShadowData& GetGpuData() const { return m_gpuData; }
 
 private:
@@ -52,6 +54,7 @@ private:
     xr_vector<ShadowView> m_views;
     xr_vector<float> m_cascadeFarBounds;
     GpuSunShadowData m_gpuData = {};
+    ShadowView m_hudView = {};
     bool m_active = false;
     bool m_loggedOnce = false;
 };
