@@ -99,6 +99,7 @@
 #include "xrEngine/IGameFont.hpp"
 #include "xrEngine/IPerformanceAlert.hpp"
 #include "xrCore/PostProcess/PPInfo.hpp"
+#include "Layers/xrRender/Shadow/ShadowManager.h"
 
 namespace xray::render::fg { xray::render::FrameGraphRenderer RImplementation; }
 
@@ -249,6 +250,7 @@ bool FrameGraphRenderer::Initialize(fg::RenderDevice* device) {
     m_overlayManager = xr_make_unique<fg::decals::OverlayManager>();
     m_rtAccelMgr = xr_make_unique<fg::RTAccelStructManager>();
     m_smokeTrailManager = xr_make_unique<fg::passes::SmokeTrailManager>();
+    m_shadowManager = xr_make_unique<shadow::ShadowManager>();
 
 
     bindless::MaterialBuffer::Instance().Initialize(m_device);
@@ -263,6 +265,7 @@ bool FrameGraphRenderer::Initialize(fg::RenderDevice* device) {
     m_overlayManager->Initialize(device);
     m_rtAccelMgr->Initialize(device);
     m_smokeTrailManager->Initialize(device);
+    m_shadowManager->Initialize(device);
 
     // Create RenderContext for execution
     m_renderContext.reset(device->CreateContext());
@@ -356,6 +359,11 @@ void FrameGraphRenderer::Shutdown() {
     if (m_smokeTrailManager) {
         m_smokeTrailManager->Shutdown();
         m_smokeTrailManager = nullptr;
+    }
+
+    if (m_shadowManager) {
+        m_shadowManager->Shutdown();
+        m_shadowManager = nullptr;
     }
 
     fg::ClusteredLightManager::Instance().Shutdown();
@@ -876,6 +884,8 @@ void FrameGraphRenderer::SetupFrame() {
 
     m_geometryCollector->EndFrame();
 
+    if (m_shadowManager)
+        m_shadowManager->BeginFrame();
 }
 
 framegraph::VirtualResourceHandle FrameGraphRenderer::CreateRT(

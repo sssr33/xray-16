@@ -136,6 +136,12 @@ target_sources(xrRender PRIVATE
     FrameGraphPasses/ReSTIRGIPassSetup.h
     FrameGraphPasses/ReSTIRGIPassSetup.cpp
     FrameGraphPasses/ClusterLightPassSetup.cpp
+    FrameGraphPasses/ShadowPassSetup.h
+    FrameGraphPasses/ShadowPassSetup.cpp
+
+    Shadow/ShadowTypes.h
+    Shadow/ShadowManager.h
+    Shadow/ShadowManager.cpp
 
     RayTracing/RTAccelStructManager.h
     RayTracing/RTAccelStructManager.cpp

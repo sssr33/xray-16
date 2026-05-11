@@ -62,6 +62,10 @@ namespace xray::render::fg::passes {
     class SmokeTrailManager;
 }
 
+namespace xray::render::shadow {
+    class ShadowManager;
+}
+
 namespace xray::render::fg {
     class ImGuiRendererNVRHI;
 }
@@ -528,6 +532,8 @@ private:
 
     // Smoke Trail Manager (GPU weapon muzzle smoke)
     xr_unique_ptr<fg::passes::SmokeTrailManager> m_smokeTrailManager;
+
+    xr_unique_ptr<shadow::ShadowManager> m_shadowManager;
 
     // Ray Tracing acceleration structures (for path tracer)
     xr_unique_ptr<fg::RTAccelStructManager> m_rtAccelMgr;
