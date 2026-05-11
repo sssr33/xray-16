@@ -54,9 +54,6 @@ cbuffer	static_globals : register(b2)
 
 	float4x4	m_InvVP;
 
-	float4x4	shadow_matrices[4];
-	float4		cascade_splits;
-
 	float4		cluster_params;
 	float4		cluster_scales;
 

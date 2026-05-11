@@ -114,9 +114,6 @@ struct alignas(16) StaticGlobals {
 
     Fmatrix m_InvVP;
 
-    Fmatrix shadow_matrices[4];
-    Fvector4 cascade_splits;
-
     Fvector4 cluster_params;
     Fvector4 cluster_scales;
 
@@ -127,7 +124,7 @@ struct alignas(16) StaticGlobals {
     Fvector4 dev_param_3;
     Fvector4 dev_param_4;
 };
-static_assert(sizeof(StaticGlobals) == 848, "StaticGlobals must be 848 bytes");
+static_assert(sizeof(StaticGlobals) == 576, "StaticGlobals must be 576 bytes");
 
 // Legacy alias for compatibility
 using GlobalConstants = StaticGlobals;
@@ -188,10 +185,6 @@ inline void FillGlobalConstants(GlobalConstants& cb) {
     // ═══════════════════════════════════════════════════════
 
     cb.m_InvVP.invert(cb.m_VP);
-
-    for (int i = 0; i < 4; i++)
-        cb.shadow_matrices[i].identity();
-    cb.cascade_splits.set(10.0f, 50.0f, 150.0f, 500.0f);
 
     // Cluster grid parameters (PLACEHOLDER - Phase 5: will be populated from light culling pass)
     cb.cluster_params.set(16.0f, 16.0f, 24.0f, 0.0f);  // 16×16×24 grid, 0 lights for now
