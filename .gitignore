@@ -22,3 +22,6 @@
 
 # exclude doxygen output
 doc/doxygen/html/*
+
+# cmake build folders
+__BUILD_*
