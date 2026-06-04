@@ -32,3 +32,47 @@ add_compile_options(
 add_link_options("/LARGEADDRESSAWARE")
 
 set(XRAY_DISABLE_WARNINGS "/w")
+
+if (CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(XRAY_SDK_PLATFORM_DIR x64)
+else()
+    set(XRAY_SDK_PLATFORM_DIR x86)
+endif()
+
+set(XRAY_SDK_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/sdk/include")
+set(XRAY_SDK_LIBRARY_DIR "${CMAKE_SOURCE_DIR}/sdk/libraries/${XRAY_SDK_PLATFORM_DIR}")
+
+function(xray_add_sdk_imported_library target library)
+    if (NOT TARGET ${target})
+        add_library(${target} UNKNOWN IMPORTED)
+        set_target_properties(${target} PROPERTIES
+            IMPORTED_LOCATION "${XRAY_SDK_LIBRARY_DIR}/${library}"
+            INTERFACE_INCLUDE_DIRECTORIES "${XRAY_SDK_INCLUDE_DIR}"
+        )
+    endif()
+endfunction()
+
+xray_add_sdk_imported_library(OpenAL::OpenAL OpenAL32.lib)
+xray_add_sdk_imported_library(Ogg::Ogg libogg_static.lib)
+xray_add_sdk_imported_library(Vorbis::Vorbis libvorbis_static.lib)
+xray_add_sdk_imported_library(Vorbis::VorbisFile libvorbisfile.lib)
+xray_add_sdk_imported_library(Theora::Theora libtheora_static.lib)
+xray_add_sdk_imported_library(LZO::LZO lzo.lib)
+xray_add_sdk_imported_library(JPEG::JPEG jpeg-static.lib)
+
+set(JPEG_FOUND TRUE)
+set(MEMORY_ALLOCATOR "standard" CACHE STRING "Use specific memory allocator (mimalloc/standard)")
+set_property(CACHE MEMORY_ALLOCATOR PROPERTY STRINGS "mimalloc" "standard")
+
+find_package(SDL2 2.0.18 CONFIG QUIET)
+if (NOT TARGET SDL2::SDL2)
+    find_package(SDL2 2.0.18 QUIET)
+endif()
+if (NOT TARGET SDL2::SDL2)
+    add_library(SDL2::SDL2 INTERFACE IMPORTED)
+    message(WARNING "SDL2 was not found. Visual Studio project generation will continue, but targets that include SDL headers require SDL2 to build.")
+endif()
+
+unset(XRAY_SDK_INCLUDE_DIR)
+unset(XRAY_SDK_LIBRARY_DIR)
+unset(XRAY_SDK_PLATFORM_DIR)

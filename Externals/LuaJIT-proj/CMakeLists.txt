@@ -68,27 +68,33 @@ if (APPLE)
 endif()
 
 # Clean unnecessary files in LuaJIT source directory
-execute_process(
-    COMMAND make clean
-    WORKING_DIRECTORY ${LUAJIT_DIR}
-)
+if (NOT MSVC)
+    execute_process(
+        COMMAND make clean
+        WORKING_DIRECTORY ${LUAJIT_DIR}
+    )
+endif()
 
 add_library(xrLuaJIT)
 
 # Compiler options
-set(CCOPT_OPT_LEVEL "-O3")
-
-set(CCOPT "${CMAKE_C_FLAGS} ${CCOPT_OPT_LEVEL}")
-
-if (XRAY_USE_ASAN)
-    set(CCOPT "${CCOPT} -fno-stack-protector")
+if (MSVC)
+    set(CCOPT /O2 /D_CRT_SECURE_NO_WARNINGS)
 else()
-    set(CCOPT "${CCOPT} -fomit-frame-pointer -fno-stack-protector")
+    set(CCOPT_OPT_LEVEL "-O3")
+
+    set(CCOPT "${CMAKE_C_FLAGS} ${CCOPT_OPT_LEVEL}")
+
+    if (XRAY_USE_ASAN)
+        set(CCOPT "${CCOPT} -fno-stack-protector")
+    else()
+        set(CCOPT "${CCOPT} -fomit-frame-pointer -fno-stack-protector")
+    endif()
+
+    set(CCOPT "${CCOPT} -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -U_FORTIFY_SOURCE")
+
+    string(REPLACE " " ";" CCOPT "${CCOPT}")
 endif()
-
-set(CCOPT "${CCOPT} -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -U_FORTIFY_SOURCE")
-
-string(REPLACE " " ";" CCOPT "${CCOPT}")
 
 add_compile_options(
     #-Wdeclaration-after-statement
@@ -137,15 +143,47 @@ set(CCOPTIONS "${CCOPT};${XCFLAGS}")
 
 target_compile_options(xrLuaJIT PRIVATE ${CCOPTIONS})
 
-execute_process(
-    COMMAND ${CMAKE_C_COMPILER} ${CCOPTIONS} -E lj_arch.h -dM
-    WORKING_DIRECTORY "${LUAJIT_DIR}"
-    OUTPUT_VARIABLE TESTARCH_OUTPUT
-    ERROR_VARIABLE TESTARCH_ERROR
-)
+if (MSVC)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|IA64|x86_64" OR CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(TESTARCH_OUTPUT "
+#define LJ_TARGET_X64 1
+#define LJ_LE 1
+#define LJ_ARCH_BITS 64
+#define LJ_HASJIT 1
+#define LJ_HASFFI 1
+#define LJ_DUALNUM 0
+#define LJ_ARCH_HASFPU 1
+#define LJ_ABI_SOFTFP 0
+#define LJ_NO_UNWIND 0
+#define LJ_FR2 1
+")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "X86|x86|i[3-6]86" OR CMAKE_SIZEOF_VOID_P EQUAL 4)
+        set(TESTARCH_OUTPUT "
+#define LJ_TARGET_X86 1
+#define LJ_LE 1
+#define LJ_ARCH_BITS 32
+#define LJ_HASJIT 1
+#define LJ_HASFFI 1
+#define LJ_DUALNUM 1
+#define LJ_ARCH_HASFPU 1
+#define LJ_ABI_SOFTFP 0
+#define LJ_NO_UNWIND 0
+#define LJ_FR2 0
+")
+    else()
+        message(FATAL_ERROR "Unsupported MSVC LuaJIT target architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+else()
+    execute_process(
+        COMMAND ${CMAKE_C_COMPILER} ${CCOPTIONS} -E lj_arch.h -dM
+        WORKING_DIRECTORY "${LUAJIT_DIR}"
+        OUTPUT_VARIABLE TESTARCH_OUTPUT
+        ERROR_VARIABLE TESTARCH_ERROR
+    )
 
-if(NOT "${TESTARCH_ERROR}" STREQUAL "")
-    message("TESTARCH_ERROR=${TESTARCH_ERROR}")
+    if(NOT "${TESTARCH_ERROR}" STREQUAL "")
+        message("TESTARCH_ERROR=${TESTARCH_ERROR}")
+    endif()
 endif()
 
 if ("${TESTARCH_OUTPUT}" MATCHES "LJ_TARGET_X64")
@@ -187,10 +225,12 @@ string(APPEND TARGET_ARCH "-DLUAJIT_TARGET=LUAJIT_ARCH_${TARGET_LJARCH}")
 if (WIN32)
     #string(APPEND TARGET_STRIP "--strip-unneeded")
 
-    target_link_options(xrLuaJIT
-        PRIVATE
-        " -shared -Wl,--out-implib,libluajit-${ABIVER}.dll.a"
-    )
+    if (NOT MSVC)
+        target_link_options(xrLuaJIT
+            PRIVATE
+            " -shared -Wl,--out-implib,libluajit-${ABIVER}.dll.a"
+        )
+    endif()
 
     if (LUAJIT_BUILD_STATIC_LIB)
         string(APPEND HOST_XCFLAGS " -DLUA_BUILD_AS_DLL")
@@ -307,9 +347,17 @@ if (TARGET_LJARCH STREQUAL "ppc")
 endif()
 
 set(HOST_ACFLAGS "${CMAKE_C_FLAGS} ${CCOPTIONS} ${TARGET_ARCH}")
-set(HOST_ALDFLAGS "${CMAKE_C_FLAGS}")
+if (MSVC)
+    set(HOST_ALDFLAGS "")
+else()
+    set(HOST_ALDFLAGS "${CMAKE_C_FLAGS}")
+endif()
 
-string(APPEND TARGET_XCFLAGS " -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -U_FORTIFY_SOURCE")
+if (MSVC)
+    list(APPEND TARGET_XCFLAGS /D_FILE_OFFSET_BITS=64 /D_LARGEFILE_SOURCE)
+else()
+    string(APPEND TARGET_XCFLAGS " -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -U_FORTIFY_SOURCE")
+endif()
 
 separate_arguments(HOST_ACFLAGS)
 separate_arguments(HOST_ALDFLAGS)
@@ -327,7 +375,13 @@ set(BUILDVM_ARCH "${CMAKE_CURRENT_BINARY_DIR}/buildvm_arch.h")
 
 # Generate buildvm arch header
 set(MINILUA_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/HostBuildTools/minilua")
-set(MINILUA_FILE "${MINILUA_BINARY_DIR}/minilua")
+if (CMAKE_CONFIGURATION_TYPES)
+    set(HOST_BUILD_CONFIG "$<CONFIG>")
+    set(MINILUA_FILE "${MINILUA_BINARY_DIR}/${HOST_BUILD_CONFIG}/minilua${CMAKE_EXECUTABLE_SUFFIX}")
+else()
+    set(HOST_BUILD_CONFIG "${CMAKE_BUILD_TYPE}")
+    set(MINILUA_FILE "${MINILUA_BINARY_DIR}/minilua${CMAKE_EXECUTABLE_SUFFIX}")
+endif()
 
 add_custom_command(
     OUTPUT "${MINILUA_FILE}"
@@ -337,12 +391,12 @@ add_custom_command(
         -S${CMAKE_CURRENT_SOURCE_DIR}/HostBuildTools/minilua
         -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}
         -DCMAKE_VERBOSE_MAKEFILE=${CMAKE_VERBOSE_MAKEFILE}
-        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE=${HOST_BUILD_CONFIG}
         -DLUAJIT_DIR=${LUAJIT_DIR}
         -DLUA_USE_POSIX=${LUA_USE_POSIX}
         -DHOST_ACFLAGS="${HOST_ACFLAGS}"
         -DHOST_ALDFLAGS="${HOST_ALDFLAGS}"
-    COMMAND ${CMAKE_COMMAND} --build ${MINILUA_BINARY_DIR} --config Release --verbose
+    COMMAND ${CMAKE_COMMAND} --build ${MINILUA_BINARY_DIR} --config ${HOST_BUILD_CONFIG} --verbose
 )
 
 add_custom_command(OUTPUT ${BUILDVM_ARCH}
@@ -360,7 +414,11 @@ set_target_properties(buildvm_arch PROPERTIES
 
 # Buildvm
 set(BUILDVM_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/HostBuildTools/buildvm")
-set(BUILDVM_FILE "${BUILDVM_BINARY_DIR}/buildvm")
+if (CMAKE_CONFIGURATION_TYPES)
+    set(BUILDVM_FILE "${BUILDVM_BINARY_DIR}/${HOST_BUILD_CONFIG}/buildvm${CMAKE_EXECUTABLE_SUFFIX}")
+else()
+    set(BUILDVM_FILE "${BUILDVM_BINARY_DIR}/buildvm${CMAKE_EXECUTABLE_SUFFIX}")
+endif()
 
 add_custom_command(
     OUTPUT "${BUILDVM_FILE}"
@@ -369,12 +427,12 @@ add_custom_command(
         -G${CMAKE_GENERATOR}
         -S${CMAKE_CURRENT_SOURCE_DIR}/HostBuildTools/buildvm
         -DCMAKE_VERBOSE_MAKEFILE=${CMAKE_VERBOSE_MAKEFILE}
-        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE=${HOST_BUILD_CONFIG}
         -DLUAJIT_DIR=${LUAJIT_DIR}
         -DBUILDVM_ARCH=${BUILDVM_ARCH}
         -DHOST_ACFLAGS="${HOST_ACFLAGS}"
         -DHOST_ALDFLAGS="${HOST_ALDFLAGS}"
-    COMMAND ${CMAKE_COMMAND} --build ${BUILDVM_BINARY_DIR} --config Release --verbose
+    COMMAND ${CMAKE_COMMAND} --build ${BUILDVM_BINARY_DIR} --config ${HOST_BUILD_CONFIG} --verbose
 )
 
 add_custom_target(buildvm
@@ -576,7 +634,7 @@ target_link_libraries(xrLuaJIT
 
 target_compile_options(xrLuaJIT
     PRIVATE
-    -Wno-comment
+    $<$<NOT:$<C_COMPILER_ID:MSVC>>:-Wno-comment>
 )
 
 set_target_properties(xrLuaJIT PROPERTIES
