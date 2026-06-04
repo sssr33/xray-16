@@ -18,11 +18,16 @@ enum class ParseIncludeResult
     NoInclude, /// There is no #include on this line
 };
 
+bool IsIncludeBlank(char c)
+{
+    return std::isblank(static_cast<unsigned char>(c));
+}
+
 // Given a string of the form: '#include "filename"' we return the filename in 'out_include_name'
 ParseIncludeResult ParseInclude(pstr string, pcstr& out_include_name)
 {
     // Skip any whitespace characters
-    while (*string != '\0' && std::isblank(*string))
+    while (*string != '\0' && IsIncludeBlank(*string))
     {
         ++string;
     }
@@ -35,7 +40,7 @@ ParseIncludeResult ParseInclude(pstr string, pcstr& out_include_name)
     string += 8;
 
     // Skip any whitespace characters
-    while (*string != '\0' && std::isblank(*string))
+    while (*string != '\0' && IsIncludeBlank(*string))
         ++string;
 
     // Check that after the tag there is a quote
