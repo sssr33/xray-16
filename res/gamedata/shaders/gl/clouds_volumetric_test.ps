@@ -1,0 +1,30 @@
+#include "common.h"
+#include "iostructs\p_volumetric_combine.h"
+
+uniform float4 clouds_color;
+uniform float4 clouds_test_params;
+
+_out _main(_input I)
+{
+    float2 uv = saturate(I.tc0.xy);
+    float2 grid_uv = uv * 12.0;
+    float2 cell = abs(frac(grid_uv) - 0.5);
+    float grid = 1.0 - smoothstep(0.465, 0.5, max(cell.x, cell.y));
+    float horizon = smoothstep(0.05, 0.85, uv.y);
+    float band = 0.5 + 0.5 * sin((uv.x * 9.0 + uv.y * 3.0 + clouds_test_params.z * 0.1) * 6.28318);
+
+    float3 uv_color = lerp(float3(0.08, 0.28, 0.85), float3(0.95, 0.72, 0.25), uv.y);
+    uv_color = lerp(uv_color, float3(0.15, 0.9, 0.75), uv.x * 0.35);
+
+    float3 tint = max(clouds_color.rgb, float3(0.15, 0.15, 0.15));
+    float3 color = lerp(uv_color, uv_color * tint * 1.7, 0.45);
+    color += grid.xxx * 0.35;
+    color *= lerp(0.75, 1.15, band);
+
+    float alpha = saturate(max(clouds_color.a, 0.35) * horizon);
+
+    _out O;
+    O.low = float4(color, alpha);
+    O.high = float4(color * 0.15, alpha);
+    return O;
+}

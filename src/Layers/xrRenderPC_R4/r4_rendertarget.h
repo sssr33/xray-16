@@ -158,6 +158,7 @@ private:
     // Combine
     ref_geom g_combine;
     ref_geom g_combine_VP; // xy=p,zw=tc
+    ref_geom g_volumetric_clouds_test;
     ref_geom g_combine_2UV;
     ref_geom g_combine_cuboid;
     ref_geom g_aa_blur;
@@ -168,6 +169,7 @@ private:
     ref_shader s_combine;
     ref_shader s_combine_msaa[8];
     ref_shader s_combine_volumetric;
+    ref_shader s_volumetric_clouds_test;
 
 public:
     ref_shader s_postprocess;
@@ -300,6 +302,7 @@ public:
     void phase_luminance();
     void phase_combine();
     void phase_combine_volumetric();
+    void phase_volumetric_clouds_test();
     void phase_pp();
 #if 0 // kept for historical reasons
     void phase_flip();

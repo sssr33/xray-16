@@ -10,6 +10,8 @@ namespace xray::render::RENDER_NAMESPACE
 
 float hclip(float v, float dim) { return 2.f * v / dim - 1.f; }
 
+static constexpr bool render_volumetric_clouds_test = true;
+
 void CRenderTarget::phase_combine()
 {
     ZoneScoped;
@@ -66,11 +68,18 @@ void CRenderTarget::phase_combine()
         // RCache.set_ColorWriteEnable					();
         //	Moved to shader!
         // RCache.set_Z(FALSE);
-        g_pGamePersistent->Environment().RenderSky();
+        //g_pGamePersistent->Environment().RenderSky();
 
-        //	Igor: Render clouds before compine without Z-test
-        //	to avoid siluets. HOwever, it's a bit slower process.
-        g_pGamePersistent->Environment().RenderClouds();
+        if (render_volumetric_clouds_test)
+        {
+            phase_volumetric_clouds_test();
+        }
+        else
+        {
+            //	Igor: Render clouds before compine without Z-test
+            //	to avoid siluets. HOwever, it's a bit slower process.
+            g_pGamePersistent->Environment().RenderClouds();
+        }
 
         //	Moved to shader!
         // RCache.set_Z(TRUE);
@@ -593,5 +602,34 @@ void CRenderTarget::phase_combine_volumetric()
         RCache.Render(D3DPT_TRIANGLELIST, Offset, 0, 4, 0, 2);
     }
     RCache.set_ColorWriteEnable();
+}
+
+void CRenderTarget::phase_volumetric_clouds_test()
+{
+    PIX_EVENT(phase_volumetric_clouds_test);
+
+    if (!s_volumetric_clouds_test)
+        return;
+
+    u32 Offset = 0;
+    u_setrt(RCache, rt_Generic_0_r, rt_Generic_1_r, nullptr, rt_MSAADepth);
+    RCache.set_CullMode(CULL_NONE);
+    RCache.set_Stencil(FALSE);
+    RCache.set_ColorWriteEnable();
+
+    FVF::TL* pv = (FVF::TL*)RImplementation.Vertex.Lock(4, g_volumetric_clouds_test->vb_stride, Offset);
+    pv->set(-1, 1, 0, 1, 0, 0, 1); pv++;
+    pv->set(-1, -1, 0, 0, 0, 0, 0); pv++;
+    pv->set(1, 1, 1, 1, 0, 1, 1); pv++;
+    pv->set(1, -1, 1, 0, 0, 1, 0); pv++;
+    RImplementation.Vertex.Unlock(4, g_volumetric_clouds_test->vb_stride);
+
+    const CEnvDescriptorMixer& envdesc = g_pGamePersistent->Environment().CurrentEnv;
+
+    RCache.set_Element(s_volumetric_clouds_test->E[0]);
+    RCache.set_Geometry(g_volumetric_clouds_test);
+    RCache.set_c("clouds_color", envdesc.clouds_color);
+    RCache.set_c("clouds_test_params", (float)Device.dwWidth, (float)Device.dwHeight, Device.fTimeGlobal, envdesc.weight);
+    RCache.Render(D3DPT_TRIANGLELIST, Offset, 0, 4, 0, 2);
 }
 } // namespace xray::render::RENDER_NAMESPACE
