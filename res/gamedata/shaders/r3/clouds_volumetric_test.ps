@@ -11,10 +11,89 @@ struct clouds_test_output
     float4 high : SV_Target1;
 };
 
+float hash31(float3 p)
+{
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+float noise3(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n000 = hash31(i + float3(0.0, 0.0, 0.0));
+    float n100 = hash31(i + float3(1.0, 0.0, 0.0));
+    float n010 = hash31(i + float3(0.0, 1.0, 0.0));
+    float n110 = hash31(i + float3(1.0, 1.0, 0.0));
+    float n001 = hash31(i + float3(0.0, 0.0, 1.0));
+    float n101 = hash31(i + float3(1.0, 0.0, 1.0));
+    float n011 = hash31(i + float3(0.0, 1.0, 1.0));
+    float n111 = hash31(i + float3(1.0, 1.0, 1.0));
+
+    float nx00 = lerp(n000, n100, f.x);
+    float nx10 = lerp(n010, n110, f.x);
+    float nx01 = lerp(n001, n101, f.x);
+    float nx11 = lerp(n011, n111, f.x);
+    float nxy0 = lerp(nx00, nx10, f.y);
+    float nxy1 = lerp(nx01, nx11, f.y);
+    return lerp(nxy0, nxy1, f.z);
+}
+
+float fbm3(float3 p)
+{
+    float v = 0.0;
+    float a = 0.5;
+    v += noise3(p) * a; p *= 2.03; a *= 0.5;
+    v += noise3(p) * a; p *= 2.11; a *= 0.5;
+    v += noise3(p) * a; p *= 2.17; a *= 0.5;
+    v += noise3(p) * a;
+    return v;
+}
+
 clouds_test_output main(clouds_test_input I)
 {
+    float3 ray = normalize(I.tc0);
+    float vertical01 = saturate((ray.y + 1.0) * 0.5);
+    float horizonFade = smoothstep(-0.62, -0.08, ray.y);
+    float topFade = 1.0 - smoothstep(0.86, 1.0, ray.y);
+    float sideBoost = 1.0 - smoothstep(0.18, 0.78, abs(ray.y));
+    float viewMask = saturate(horizonFade * topFade * (1.0 + sideBoost * 1.35));
+
+    float density = 0.0;
+    float transmittance = 1.0;
+
+    [unroll]
+    for (int i = 0; i < 16; ++i)
+    {
+        float s = (i + 0.5) / 16.0;
+        float t = lerp(0.55, 4.2, s);
+        float3 p = ray * t;
+
+        float bandCenter = 0.42;
+        float band = 1.0 - saturate(abs(vertical01 - bandCenter) / 0.46);
+        band = band * band * (3.0 - 2.0 * band);
+
+        float layerFade = smoothstep(0.0, 0.18, s) * (1.0 - smoothstep(0.82, 1.0, s));
+        float baseNoise = fbm3(float3(p.xz * 0.42, p.y * 0.22 + vertical01 * 3.0));
+        float detailNoise = fbm3(float3(p.xz * 1.65 + 17.0, p.y * 0.55 + vertical01 * 8.0));
+        float cloud = saturate((baseNoise - 0.38) * 2.55 + (detailNoise - 0.5) * 0.55);
+        cloud *= lerp(0.45, 1.0, band);
+        cloud *= layerFade * viewMask;
+
+        float stepAlpha = cloud * 0.15;
+        density += transmittance * stepAlpha;
+        transmittance *= 1.0 - stepAlpha;
+    }
+
+    density = saturate(density);
+    float3 cloudColor = lerp(float3(0.35, 0.40, 0.43), float3(0.86, 0.90, 0.88), saturate(vertical01 * 1.15));
+    cloudColor *= 0.85 + density * 0.55;
+
     clouds_test_output O;
-    O.low = float4(0.0, 1.0, 0.0, 1.0);
+    O.low = float4(cloudColor, density);
     O.high = float4(0.0, 0.0, 0.0, 0.0); // dont write to bloom/blur
     return O;
 }
