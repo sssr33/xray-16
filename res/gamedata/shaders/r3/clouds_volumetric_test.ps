@@ -1,0 +1,20 @@
+struct clouds_test_input
+{
+    float4 factor : COLOR0;
+    float3 tc0 : TEXCOORD0;
+    float3 tc1 : TEXCOORD1;
+};
+
+struct clouds_test_output
+{
+    float4 low : SV_Target0;
+    float4 high : SV_Target1;
+};
+
+clouds_test_output main(clouds_test_input I)
+{
+    clouds_test_output O;
+    O.low = float4(0.0, 1.0, 0.0, 1.0);
+    O.high = float4(0.0, 0.0, 0.0, 0.0); // dont write to bloom/blur
+    return O;
+}

@@ -649,15 +649,6 @@ CRenderTarget::CRenderTarget()
             { 0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 }, // pos+uv
             D3DDECL_END()
         };
-#if RENDER == R_R4
-        static D3DVERTEXELEMENT9 cloudsTestDecl[] =
-        {
-            { 0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
-            { 0, 16, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
-            { 0, 20, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
-            D3DDECL_END()
-        };
-#endif
 
         CBlender_combine b_combine;
         s_combine.create(&b_combine, "r2" DELIMITER "combine");
@@ -670,7 +661,9 @@ CRenderTarget::CRenderTarget()
         s_combine_dbg_Accumulator.create("effects" DELIMITER "screen_set", r2_RT_accum);
         g_combine_VP.create(dwDecl, RImplementation.Vertex.Buffer(), RImplementation.QuadIB);
 #if RENDER == R_R4
-        g_volumetric_clouds_test.create(cloudsTestDecl, RImplementation.Vertex.Buffer(), RImplementation.QuadIB);
+        g_volumetric_clouds_test.create(
+            D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2 | D3DFVF_TEXCOORDSIZE3(0) | D3DFVF_TEXCOORDSIZE3(1),
+            RImplementation.Vertex.Buffer(), RImplementation.Index.Buffer());
 #endif
         g_combine.create(FVF::F_TL, RImplementation.Vertex.Buffer(), RImplementation.QuadIB);
         g_combine_2UV.create(FVF::F_TL2uv, RImplementation.Vertex.Buffer(), RImplementation.QuadIB);

@@ -12,6 +12,51 @@ float hclip(float v, float dim) { return 2.f * v / dim - 1.f; }
 
 static constexpr bool render_volumetric_clouds_test = true;
 
+static Fvector3 clouds_test_hbox_verts[24] =
+{
+    {-1.f,   -1.f, -1.f}, { -1.f, -1.01f, -1.f},
+    { 1.f,   -1.f, -1.f}, {  1.f, -1.01f, -1.f},
+    {-1.f,   -1.f,  1.f}, { -1.f, -1.01f,  1.f},
+    { 1.f,   -1.f,  1.f}, {  1.f, -1.01f,  1.f},
+    {-1.f,    1.f, -1.f}, { -1.f,  1.f,   -1.f},
+    { 1.f,    1.f, -1.f}, {  1.f,  1.f,   -1.f},
+    {-1.f,    1.f,  1.f}, { -1.f,  1.f,    1.f},
+    { 1.f,    1.f,  1.f}, {  1.f,  1.f,    1.f},
+    {-1.f, -0.01f, -1.f}, { -1.f, -1.f,   -1.f},
+    { 1.f, -0.01f, -1.f}, {  1.f, -1.f,   -1.f},
+    { 1.f, -0.01f,  1.f}, {  1.f, -1.f,    1.f},
+    {-1.f, -0.01f,  1.f}, { -1.f, -1.f,    1.f}
+};
+
+static u16 clouds_test_hbox_faces[20 * 3] =
+{
+    0, 2, 3, 3, 1, 0,
+    4, 5, 7, 7, 6, 4,
+    0, 1, 9, 9, 8, 0,
+    8, 9, 5, 5, 4, 8,
+    1, 3, 10, 10, 9, 1,
+    9, 10, 7, 7, 5, 9,
+    3, 2, 11, 11, 10, 3,
+    10, 11, 6, 6, 7, 10,
+    2, 0, 8, 8, 11, 2,
+    11, 8, 4, 4, 6, 11
+};
+
+struct clouds_test_skybox_vertex
+{
+    Fvector3 p;
+    u32 color;
+    Fvector3 uv[2];
+
+    void set(Fvector3& position, u32 c, Fvector3& tc)
+    {
+        p = position;
+        color = c;
+        uv[0] = tc;
+        uv[1] = tc;
+    }
+};
+
 void CRenderTarget::phase_combine()
 {
     ZoneScoped;
@@ -611,25 +656,33 @@ void CRenderTarget::phase_volumetric_clouds_test()
     if (!s_volumetric_clouds_test)
         return;
 
-    u32 Offset = 0;
+    RImplementation.rmFar(RCache);
+
+    Fmatrix mSky;
+    mSky.rotateY(g_pGamePersistent->Environment().CurrentEnv.sky_rotation);
+    mSky.translate_over(Device.vCameraPosition);
+
+    u32 i_offset, v_offset;
     u_setrt(RCache, rt_Generic_0_r, rt_Generic_1_r, nullptr, rt_MSAADepth);
     RCache.set_CullMode(CULL_NONE);
     RCache.set_Stencil(FALSE);
     RCache.set_ColorWriteEnable();
 
-    FVF::TL* pv = (FVF::TL*)RImplementation.Vertex.Lock(4, g_volumetric_clouds_test->vb_stride, Offset);
-    pv->set(-1, 1, 0, 1, 0, 0, 1); pv++;
-    pv->set(-1, -1, 0, 0, 0, 0, 0); pv++;
-    pv->set(1, 1, 1, 1, 0, 1, 1); pv++;
-    pv->set(1, -1, 1, 0, 0, 1, 0); pv++;
-    RImplementation.Vertex.Unlock(4, g_volumetric_clouds_test->vb_stride);
+    u16* pib = RImplementation.Index.Lock(20 * 3, i_offset);
+    CopyMemory(pib, clouds_test_hbox_faces, 20 * 3 * sizeof(u16));
+    RImplementation.Index.Unlock(20 * 3);
 
-    const CEnvDescriptorMixer& envdesc = g_pGamePersistent->Environment().CurrentEnv;
+    const u32 color = color_rgba(0, 255, 0, 255);
+    clouds_test_skybox_vertex* pv =
+        (clouds_test_skybox_vertex*)RImplementation.Vertex.Lock(12, g_volumetric_clouds_test->vb_stride, v_offset);
+    for (u32 v = 0; v < 12; ++v)
+        pv[v].set(clouds_test_hbox_verts[v * 2], color, clouds_test_hbox_verts[v * 2 + 1]);
+    RImplementation.Vertex.Unlock(12, g_volumetric_clouds_test->vb_stride);
 
+    RCache.set_xform_world(mSky);
     RCache.set_Element(s_volumetric_clouds_test->E[0]);
     RCache.set_Geometry(g_volumetric_clouds_test);
-    RCache.set_c("clouds_color", envdesc.clouds_color);
-    RCache.set_c("clouds_test_params", (float)Device.dwWidth, (float)Device.dwHeight, Device.fTimeGlobal, envdesc.weight);
-    RCache.Render(D3DPT_TRIANGLELIST, Offset, 0, 4, 0, 2);
+    RCache.Render(D3DPT_TRIANGLELIST, v_offset, 0, 12, i_offset, 20);
+    RImplementation.rmNormal(RCache);
 }
 } // namespace xray::render::RENDER_NAMESPACE
