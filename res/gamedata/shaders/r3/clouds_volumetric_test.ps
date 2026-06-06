@@ -11,6 +11,8 @@ struct clouds_test_output
     float4 high : SV_Target1;
 };
 
+float4 clouds_test_params;
+
 float hash31(float3 p)
 {
     p = frac(p * 0.1031);
@@ -64,6 +66,8 @@ clouds_test_output main(clouds_test_input I)
 
     float density = 0.0;
     float transmittance = 1.0;
+    float time = clouds_test_params.z * 10.0;
+    float2 wind = float2(0.018, -0.011) * time;
 
     [unroll]
     for (int i = 0; i < 16; ++i)
@@ -77,8 +81,8 @@ clouds_test_output main(clouds_test_input I)
         band = band * band * (3.0 - 2.0 * band);
 
         float layerFade = smoothstep(0.0, 0.18, s) * (1.0 - smoothstep(0.82, 1.0, s));
-        float baseNoise = fbm3(float3(p.xz * 0.42, p.y * 0.22 + vertical01 * 3.0));
-        float detailNoise = fbm3(float3(p.xz * 1.65 + 17.0, p.y * 0.55 + vertical01 * 8.0));
+        float baseNoise = fbm3(float3(p.xz * 0.42 + wind, p.y * 0.22 + vertical01 * 3.0 + time * 0.004));
+        float detailNoise = fbm3(float3(p.xz * 1.65 + 17.0 + wind * 3.4, p.y * 0.55 + vertical01 * 8.0 - time * 0.007));
         float cloud = saturate((baseNoise - 0.38) * 2.55 + (detailNoise - 0.5) * 0.55);
         cloud *= lerp(0.45, 1.0, band);
         cloud *= layerFade * viewMask;
@@ -89,8 +93,11 @@ clouds_test_output main(clouds_test_input I)
     }
 
     density = saturate(density);
-    float3 cloudColor = lerp(float3(0.35, 0.40, 0.43), float3(0.86, 0.90, 0.88), saturate(vertical01 * 1.15));
-    cloudColor *= 0.85 + density * 0.55;
+    float warmBreak = saturate((0.58 - density) * 2.4) * smoothstep(0.18, 0.82, vertical01);
+    float3 stormBase = lerp(float3(0.16, 0.19, 0.20), float3(0.42, 0.47, 0.48), saturate(vertical01 * 1.15));
+    float3 warmLight = float3(0.98, 0.82, 0.48);
+    float3 cloudColor = lerp(stormBase, warmLight, warmBreak * 0.42);
+    cloudColor *= lerp(0.72, 1.18, saturate(density * 1.3 + warmBreak * 0.45));
 
     clouds_test_output O;
     O.low = float4(cloudColor, density);

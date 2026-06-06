@@ -682,6 +682,7 @@ void CRenderTarget::phase_volumetric_clouds_test()
     RCache.set_xform_world(mSky);
     RCache.set_Element(s_volumetric_clouds_test->E[0]);
     RCache.set_Geometry(g_volumetric_clouds_test);
+    RCache.set_c("clouds_test_params", 0.0f, 0.0f, Device.fTimeGlobal, 0.0f);
     RCache.Render(D3DPT_TRIANGLELIST, v_offset, 0, 12, i_offset, 20);
     RImplementation.rmNormal(RCache);
 }
